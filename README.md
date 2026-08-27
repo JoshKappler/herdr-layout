@@ -7,6 +7,8 @@ a live colored action line per session, a native right-side detail panel with th
 focused session's last prompt and reply read straight from the transcript, a minimize
 rail, and a drag-to-minimize divider. All of it is in the commits past the v0.7.5 tag.
 
+![the boxed-tab sidebar: a selected tab filled inside its border, live action lines, state dots](assets/josh-sidebar.png)
+
 Upstream herdr is by [ogulcancelik](https://github.com/ogulcancelik); the original
 README follows.
 
