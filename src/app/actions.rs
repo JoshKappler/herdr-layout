@@ -2686,6 +2686,7 @@ impl AppState {
                 state,
                 visible_blocker,
                 visible_working,
+                bg_wait,
                 process_exited,
                 observed_at,
             } => self
@@ -2694,7 +2695,7 @@ impl AppState {
                         agent,
                         state,
                         visible_blocker,
-                        false,
+                        bg_wait,
                         visible_working,
                         process_exited,
                         observed_at,
@@ -4542,6 +4543,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4580,6 +4582,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4613,6 +4616,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4635,6 +4639,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4656,6 +4661,7 @@ mod tests {
             state: AgentState::Unknown,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4665,6 +4671,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4710,6 +4717,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4734,6 +4742,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4766,6 +4775,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4777,6 +4787,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: true,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4800,6 +4811,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4825,6 +4837,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4852,6 +4865,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4907,6 +4921,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4925,6 +4940,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: true,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4955,6 +4971,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4978,6 +4995,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5004,6 +5022,7 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: true,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5037,6 +5056,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5161,6 +5181,7 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5190,6 +5211,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5216,6 +5238,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5239,6 +5262,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -5260,6 +5284,7 @@ mod tests {
             state: AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });

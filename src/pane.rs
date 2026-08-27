@@ -172,6 +172,7 @@ async fn publish_state_changed_event(
     state: AgentState,
     visible_blocker: bool,
     visible_working: bool,
+    bg_wait: bool,
     process_exited: bool,
     observed_at: std::time::Instant,
 ) {
@@ -185,6 +186,7 @@ async fn publish_state_changed_event(
             state,
             visible_blocker,
             visible_working,
+            bg_wait,
             process_exited,
             observed_at,
         })
@@ -204,6 +206,7 @@ struct AgentDetectionPublishUpdate {
     visible_idle: bool,
     visible_blocker: bool,
     visible_working: bool,
+    bg_wait: bool,
     process_exited: bool,
 }
 
@@ -217,6 +220,7 @@ async fn apply_agent_detection_publish_update(
     last_visible_idle: &mut bool,
     last_visible_blocker: &mut bool,
     last_visible_working: &mut bool,
+    last_bg_wait: &mut bool,
     last_visible_signal_refresh: &mut Option<std::time::Instant>,
     foreground_shell_exit_reported: &mut bool,
 ) {
@@ -224,6 +228,7 @@ async fn apply_agent_detection_publish_update(
     *last_visible_idle = update.visible_idle;
     *last_visible_blocker = update.visible_blocker;
     *last_visible_working = update.visible_working;
+    *last_bg_wait = update.bg_wait;
     *last_visible_signal_refresh = if update.visible_blocker || update.visible_working {
         Some(observed_at)
     } else {
@@ -239,6 +244,7 @@ async fn apply_agent_detection_publish_update(
         update.state,
         update.visible_blocker,
         update.visible_working,
+        update.bg_wait,
         update.process_exited,
         observed_at,
     )
@@ -582,6 +588,7 @@ fn spawn_basic_detection_task(
         let mut agent_presence = AgentDetectionPresence::from_agent(None);
         let mut state = AgentState::Unknown;
         let mut last_visible_idle = false;
+        let mut last_bg_wait = false;
         let mut last_visible_blocker = false;
         let mut last_visible_working = false;
         let mut last_visible_signal_refresh = None;
@@ -739,6 +746,7 @@ fn spawn_basic_detection_task(
                                 false,
                                 false,
                                 false,
+                                false,
                                 now,
                             )
                             .await;
@@ -778,6 +786,7 @@ fn spawn_basic_detection_task(
                             detection.state,
                             detection.visible_blocker,
                             detection.visible_working,
+                            detection.bg_wait,
                             false,
                             now,
                         )
@@ -855,6 +864,7 @@ fn spawn_basic_detection_task(
                 ScreenDetectionPublishInput {
                     screen_detection,
                     current_state: state,
+                    last_bg_wait,
                     last_visible_idle,
                     last_visible_blocker,
                     last_visible_working,
@@ -871,6 +881,7 @@ fn spawn_basic_detection_task(
                     visible_idle,
                     visible_blocker,
                     visible_working,
+                    bg_wait,
                     process_exited: publish_process_exited,
                 } => {
                     apply_agent_detection_publish_update(
@@ -882,6 +893,7 @@ fn spawn_basic_detection_task(
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            bg_wait,
                             process_exited: publish_process_exited,
                         },
                         now,
@@ -889,6 +901,7 @@ fn spawn_basic_detection_task(
                         &mut last_visible_idle,
                         &mut last_visible_blocker,
                         &mut last_visible_working,
+                        &mut last_bg_wait,
                         &mut last_visible_signal_refresh,
                         &mut foreground_shell_exit_reported,
                     )
@@ -2017,6 +2030,7 @@ impl PaneRuntime {
                     AgentDetectionPresence::from_agent(initial_state.detected_agent);
                 let mut state = AgentState::Idle;
                 let mut last_visible_idle = initial_state.detected_agent.is_some();
+                let mut last_bg_wait = false;
                 let mut last_process_check = Instant::now();
                 let mut last_foreground_pgid = None;
                 let mut has_process_probe = false;
@@ -2183,12 +2197,14 @@ impl PaneRuntime {
                                         last_visible_idle = true;
                                         last_visible_blocker = false;
                                         last_visible_working = false;
+                                        last_bg_wait = false;
                                         last_visible_signal_refresh = None;
                                         publish_state_changed_event(
                                             state_events.clone(),
                                             pane_id,
                                             agent,
                                             AgentState::Idle,
+                                            false,
                                             false,
                                             false,
                                             false,
@@ -2308,6 +2324,7 @@ impl PaneRuntime {
                         ScreenDetectionPublishInput {
                             screen_detection,
                             current_state: state,
+                            last_bg_wait,
                             last_visible_idle,
                             last_visible_blocker,
                             last_visible_working,
@@ -2324,6 +2341,7 @@ impl PaneRuntime {
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            bg_wait,
                             process_exited: publish_process_exited,
                         } => {
                             apply_agent_detection_publish_update(
@@ -2335,6 +2353,7 @@ impl PaneRuntime {
                                     visible_idle,
                                     visible_blocker,
                                     visible_working,
+                                    bg_wait,
                                     process_exited: publish_process_exited,
                                 },
                                 now,
@@ -2342,6 +2361,7 @@ impl PaneRuntime {
                                 &mut last_visible_idle,
                                 &mut last_visible_blocker,
                                 &mut last_visible_working,
+                                &mut last_bg_wait,
                                 &mut last_visible_signal_refresh,
                                 &mut foreground_shell_exit_reported,
                             )
@@ -4028,6 +4048,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             std::time::Instant::now(),
         );
         tokio::pin!(publish);
@@ -4065,6 +4086,7 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                bg_wait: false,
                 process_exited: false,
                 observed_at: _,
             } if delivered_pane == pane_id

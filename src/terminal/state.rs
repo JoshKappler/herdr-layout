@@ -122,6 +122,8 @@ pub struct TerminalState {
     metadata_report_sequences: HashMap<String, u64>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
+    /// The turn is over but shells, agents, or tasks still run (Josh 2026-08-27).
+    pub bg_wait: bool,
     pub last_agent_state_change_seq: Option<u64>,
     // epoch millis, not Instant: survives detach and lets the UI show elapsed
     pub last_agent_state_change_at: Option<u64>,
@@ -156,6 +158,7 @@ impl TerminalState {
             metadata_report_sequences: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
+            bg_wait: false,
             last_agent_state_change_seq: None,
             last_agent_state_change_at: None,
             revision: 0,
@@ -264,11 +267,12 @@ impl TerminalState {
         agent: Option<Agent>,
         fallback_state: AgentState,
         visible_blocker: bool,
-        _visible_idle: bool,
+        bg_wait: bool,
         visible_working: bool,
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
+        self.bg_wait = bg_wait;
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
@@ -1826,6 +1830,7 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
         };
 
         assert_eq!(stabilize_agent_detection(detection), AgentState::Idle);

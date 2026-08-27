@@ -719,6 +719,36 @@ fn claude_activity_line_is_working_even_with_no_title() {
 }
 
 #[test]
+fn claude_background_shell_bar_is_a_background_wait() {
+    // the ⏸⏵ status row keeps counting shells after the turn ends
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 31% · earlier prompt\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait);
+}
+
+#[test]
+fn claude_live_turn_is_not_a_background_wait() {
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.bg_wait);
+}
+
+#[test]
 fn claude_blocker_outranks_activity_line() {
     let screen = "\u{2733} Simmering\u{2026} (esc to interrupt)\n\
         do you want to proceed?\n\

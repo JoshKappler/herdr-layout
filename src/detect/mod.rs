@@ -36,6 +36,9 @@ pub struct AgentDetection {
     /// activity is the normal working authority; this remains diagnostic
     /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+    /// True when the winning rule marks a background wait: the turn is over
+    /// but shells, agents, or tasks are still running.
+    pub bg_wait: bool,
 }
 
 /// Which agent we detected running in a pane.
@@ -264,6 +267,7 @@ pub fn detect_agent_with_osc(
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
         };
     };
     manifest::detect_with_osc(

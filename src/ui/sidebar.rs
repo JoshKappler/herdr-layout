@@ -214,26 +214,54 @@ pub(crate) struct TabDash {
     pub tab_idx: usize,
     pub state: AgentState,
     pub seen: bool,
-    /// live subagents under this tab: the dot gets a blue ring while the
-    /// parent works so a subagent wait is visible (Josh 2026-08-27)
+    /// the turn is over but background shells, agents, or tasks still run
+    pub bg_wait: bool,
+    /// live subagents under this tab, from the summarizer's lane header
     pub subs_live: bool,
     pub rows: Vec<TabDashRow>,
 }
 
 const TAB_LANE_KEYS: [&str; 7] = ["l1", "l2", "l3", "l4", "l5", "l6", "lmore"];
 
+/// The tab status cell, shared by both sidebars. Done-but-waiting (turn
+/// ended, subagents/shells/tasks still run) is a yellow center ringed in
+/// the done color: teal until viewed, green after (Josh 2026-08-27).
+fn tab_status_cell(
+    state: AgentState,
+    seen: bool,
+    bg_wait: bool,
+    subs_live: bool,
+    p: &crate::app::state::Palette,
+) -> (&'static str, Style) {
+    let done_waiting = (matches!(state, AgentState::Working) && bg_wait)
+        || (matches!(state, AgentState::Idle) && subs_live);
+    if done_waiting {
+        let ring = if seen { p.green } else { p.teal };
+        return ("○", Style::default().fg(ring).bg(p.yellow));
+    }
+    if matches!(state, AgentState::Working) && subs_live {
+        return ("◉", Style::default().fg(p.yellow));
+    }
+    state_dot(state, seen, p)
+}
+
 fn tab_attention(
     app: &AppState,
     tab: &crate::workspace::Tab,
-) -> (AgentState, bool, Option<u64>) {
+) -> (AgentState, bool, Option<u64>, bool) {
     tab.panes
         .values()
         .filter_map(|pane| {
             let terminal = app.terminals.get(&pane.attached_terminal_id)?;
-            Some((terminal.state, pane.seen, terminal.last_agent_state_change_at))
+            Some((
+                terminal.state,
+                pane.seen,
+                terminal.last_agent_state_change_at,
+                terminal.bg_wait,
+            ))
         })
-        .max_by_key(|(state, seen, _)| workspace_attention_priority(*state, *seen))
-        .unwrap_or((AgentState::Unknown, true, None))
+        .max_by_key(|(state, seen, _, _)| workspace_attention_priority(*state, *seen))
+        .unwrap_or((AgentState::Unknown, true, None, false))
 }
 
 fn fmt_elapsed(since_ms: u64) -> String {
@@ -425,7 +453,7 @@ pub(crate) fn tab_dashboards(
         .enumerate()
         .map(|(tab_idx, tab)| {
             let toks = tab.metadata_tokens.values();
-            let (state, seen, since_ms) = tab_attention(app, tab);
+            let (state, seen, since_ms, bg_wait) = tab_attention(app, tab);
             let title = toks
                 .get("t")
                 .or_else(|| toks.get("sh"))
@@ -482,6 +510,7 @@ pub(crate) fn tab_dashboards(
                 tab_idx,
                 state,
                 seen,
+                bg_wait,
                 subs_live: toks.get("hdr").is_some_and(|h| h.contains(" sub")),
                 rows,
             }
@@ -1118,7 +1147,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         let Some(tab) = ws.tabs.get(tab_box.tab_idx) else {
             continue;
         };
-        let (state, seen, _) = tab_attention(app, tab);
+        let (state, seen, _, bg_wait) = tab_attention(app, tab);
         let selected = tab_box.ws_idx == app.selected && is_navigating;
         let tab_is_active =
             Some(tab_box.ws_idx) == app.active && tab_box.tab_idx == ws.active_tab;
@@ -1152,17 +1181,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             buf[(rect.x, by)].set_symbol("▌");
             buf[(rect.x, by)].set_style(rail);
         }
-        let (icon, icon_style) = state_dot(state, seen, p);
         let subs_live = tab
             .metadata_tokens
             .values()
             .get("hdr")
             .is_some_and(|h| h.contains(" sub"));
-        if subs_live && matches!(state, AgentState::Working) {
-            buf.set_string(bx + 2, top + 1, "◉", Style::default().fg(p.yellow));
-        } else {
-            buf.set_string(bx + 2, top + 1, icon, icon_style);
-        }
+        let (icon, icon_style) = tab_status_cell(state, seen, bg_wait, subs_live, p);
+        buf.set_string(bx + 2, top + 1, icon, icon_style);
     }
 
     render_sidebar_toggle(app, frame, area, true, p);
@@ -1622,7 +1647,6 @@ fn render_workspace_list(
                 buf[(card.rect.x, by)].set_style(rail);
             }
 
-            let dot = state_dot(dash.state, dash.seen, p);
             let phase_style = phase_tint(dash.state, dash.seen, p);
             let base = Style::default().fg(p.text);
             let inner_x = bx + 2;
@@ -1642,8 +1666,6 @@ fn render_workspace_list(
                             .then_some(*since_ms)
                             .flatten()
                             .map(fmt_elapsed);
-                        let ringed =
-                            dash.subs_live && matches!(dash.state, AgentState::Working);
                         let status_width = 1
                             + elapsed.as_ref().map(|e| display_width(e) + 1).unwrap_or(0);
                         let text_w =
@@ -1659,14 +1681,14 @@ fn render_workspace_list(
                             buf.set_string(sx, ry, e, Style::default().fg(p.subtext0));
                             sx += display_width(e) as u16 + 1;
                         }
-                        if ringed {
-                            // yellow so the tab still reads working; the
-                            // ring shape says the wait is on subagents
-                            // (Josh 2026-08-27)
-                            buf.set_string(sx, ry, "◉", Style::default().fg(p.yellow));
-                        } else {
-                            buf.set_string(sx, ry, dot.0, dot.1);
-                        }
+                        let (icon, icon_style) = tab_status_cell(
+                            dash.state,
+                            dash.seen,
+                            dash.bg_wait,
+                            dash.subs_live,
+                            p,
+                        );
+                        buf.set_string(sx, ry, icon, icon_style);
                     }
                     TabDashRow::TitleCont { text, tint_at } => {
                         draw_tab_line(
@@ -1775,6 +1797,36 @@ mod tests {
                     row_text(buffer, row, width)
                 )
             })
+    }
+
+    #[test]
+    fn status_cell_blends_done_but_waiting() {
+        let p = crate::app::state::AppState::test_new().palette;
+
+        let (sym, style) = tab_status_cell(AgentState::Working, false, true, false, &p);
+        assert_eq!(sym, "○");
+        assert_eq!(style.fg, Some(p.teal));
+        assert_eq!(style.bg, Some(p.yellow));
+
+        let (sym, style) = tab_status_cell(AgentState::Working, true, true, false, &p);
+        assert_eq!(sym, "○");
+        assert_eq!(style.fg, Some(p.green));
+        assert_eq!(style.bg, Some(p.yellow));
+
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, true, &p);
+        assert_eq!(sym, "○");
+        assert_eq!(style.fg, Some(p.teal));
+        assert_eq!(style.bg, Some(p.yellow));
+
+        let (sym, style) = tab_status_cell(AgentState::Working, false, false, true, &p);
+        assert_eq!(sym, "◉");
+        assert_eq!(style.fg, Some(p.yellow));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, false, &p);
+        assert_eq!(sym, "●");
+        assert_eq!(style.fg, Some(p.teal));
+        assert_eq!(style.bg, None);
     }
 
     #[test]
