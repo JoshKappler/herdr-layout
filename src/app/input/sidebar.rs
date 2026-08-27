@@ -1141,6 +1141,87 @@ mod tests {
         assert_eq!(app.state.workspaces[1].tabs.len(), 2);
     }
 
+    fn drag_first_workspace_second_tab_to_second_workspace(app: &mut crate::app::App) {
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let tab_row = app
+            .state
+            .view
+            .sidebar_tab_rows
+            .iter()
+            .find(|row| row.ws_idx == 0 && row.tab_idx == 1)
+            .unwrap()
+            .rect
+            .y;
+        let target_row = app.state.view.workspace_card_areas[1].rect.y;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, tab_row));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, target_row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
+    }
+
+    #[test]
+    fn dragging_sidebar_tab_to_another_space_keeps_metadata_tokens() {
+        let mut app = app_for_mouse_test();
+        let mut source = Workspace::test_new("a");
+        source.test_add_tab(Some("logs"));
+        app.state.workspaces = vec![source, Workspace::test_new("b")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let stamped = std::collections::HashMap::from([
+            ("summary".to_string(), "indexing the corpus".to_string()),
+            ("model".to_string(), "opus".to_string()),
+        ]);
+        app.state.workspaces[0].tabs[1].metadata_tokens.patch(
+            stamped
+                .iter()
+                .map(|(key, value)| (key.clone(), Some(value.clone())))
+                .collect(),
+            None,
+            std::time::Instant::now(),
+        );
+
+        drag_first_workspace_second_tab_to_second_workspace(&mut app);
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[1].tabs.len(), 2);
+        let moved = app.state.workspaces[1].tabs.last().unwrap();
+        assert_eq!(moved.metadata_tokens.values(), stamped);
+    }
+
+    #[test]
+    fn dragging_multi_pane_sidebar_tab_to_another_space_keeps_panes_and_tokens() {
+        let mut app = app_for_mouse_test();
+        let mut source = Workspace::test_new("a");
+        let tab_idx = source.test_add_tab(Some("logs"));
+        source.switch_tab(tab_idx);
+        source.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![source, Workspace::test_new("b")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let stamped = std::collections::HashMap::from([(
+            "summary".to_string(),
+            "two panes of logs".to_string(),
+        )]);
+        app.state.workspaces[0].tabs[1].metadata_tokens.patch(
+            stamped
+                .iter()
+                .map(|(key, value)| (key.clone(), Some(value.clone())))
+                .collect(),
+            None,
+            std::time::Instant::now(),
+        );
+
+        drag_first_workspace_second_tab_to_second_workspace(&mut app);
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[1].tabs.len(), 2);
+        let moved = app.state.workspaces[1].tabs.last().unwrap();
+        assert_eq!(moved.panes.len(), 2);
+        assert_eq!(moved.metadata_tokens.values(), stamped);
+    }
+
     #[test]
     fn clicking_tab_scroll_button_reveals_hidden_tabs_without_renaming() {
         let mut app = app_for_mouse_test();
