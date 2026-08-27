@@ -700,6 +700,36 @@ fn claude_blocker_screen_outranks_osc_working_title() {
 }
 
 #[test]
+fn claude_activity_line_is_working_even_with_no_title() {
+    // captured from a real working pane on 2026-08-27; the ✳ frame glyph is
+    // the fork's addition to the live_turn_working set
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens · thought for 12s)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_blocker_outranks_activity_line() {
+    let screen = "\u{2733} Simmering\u{2026} (esc to interrupt)\n\
+        do you want to proceed?\n\
+        bash command: rm -rf /tmp/test\n\
+        ❯ 1. Yes\n   2. No\n\
+        Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Blocked);
+}
+
+#[test]
 fn claude_empty_osc_empty_screen_is_idle_fallback() {
     // No OSC data, no matching screen rule → fallback idle (unchanged V3 behavior)
     let result = osc_explain(Agent::Claude, "", "", "");
