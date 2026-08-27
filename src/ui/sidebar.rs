@@ -387,9 +387,8 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
-/// Thin line box normally; a highlighted box renders as a solid slab
-/// instead (the fill is painted, no outline drawn), so the highlight is one
-/// clean rectangle with nothing to misalign (Josh 2026-08-27).
+/// Thin line box. Highlighted tabs fill only the interior, so the outline
+/// stays visible and the fill sits exactly inside it (Josh 2026-08-27).
 fn draw_tab_box_border(
     buf: &mut ratatui::buffer::Buffer,
     bx: u16,
@@ -397,11 +396,7 @@ fn draw_tab_box_border(
     top: u16,
     bottom: u16,
     border: Style,
-    filled: bool,
 ) {
-    if filled {
-        return;
-    }
     for x in bx..bx + bw {
         buf[(x, top)].set_symbol("─");
         buf[(x, top)].set_style(border);
@@ -1141,19 +1136,17 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         } else {
             None
         };
+        let top = rect.y;
+        let bottom = rect.y + rect.height - 1;
         if let Some(bg) = box_bg {
-            // border cells too: their glyphs are thin lines, so an interior-only
-            // fill leaves a dark margin inside the box (Josh 2026-08-27)
-            for by in rect.y..rect.y + rect.height {
-                for x in bx..bx + bw {
+            for by in top + 1..bottom {
+                for x in bx + 1..bx + bw - 1 {
                     buf[(x, by)].set_style(Style::default().bg(bg));
                 }
             }
         }
         let border = Style::default().fg(p.overlay0);
-        let top = rect.y;
-        let bottom = rect.y + rect.height - 1;
-        draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
+        draw_tab_box_border(buf, bx, bw, top, bottom, border);
         let rail = Style::default().fg(space_rail_color(ws, p));
         for by in rect.y..rect.y + rect.height {
             buf[(rect.x, by)].set_symbol("▌");
@@ -1166,7 +1159,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             .get("hdr")
             .is_some_and(|h| h.contains(" sub"));
         if subs_live && matches!(state, AgentState::Working) {
-            buf.set_string(bx + 2, top + 1, "◉", Style::default().fg(p.teal));
+            buf.set_string(bx + 2, top + 1, "◉", Style::default().fg(p.yellow));
         } else {
             buf.set_string(bx + 2, top + 1, icon, icon_style);
         }
@@ -1604,9 +1597,6 @@ fn render_workspace_list(
                 break;
             }
             let tab_is_active = is_active && dash.tab_idx == ws.active_tab;
-            // fill the whole box, border cells included: the line glyphs are
-            // thin, so stopping at the interior leaves a dark margin inside
-            // the box (Josh 2026-08-27)
             let box_bg = if selected {
                 Some(p.surface0)
             } else if is_dragged || is_drop_target {
@@ -1616,17 +1606,17 @@ fn render_workspace_list(
             } else {
                 None
             };
+            let top = y;
+            let bottom = y + box_h - 1;
             if let Some(bg) = box_bg {
-                for by in y..y + box_h {
-                    for x in bx..bx + bw {
+                for by in top + 1..bottom {
+                    for x in bx + 1..bx + bw - 1 {
                         buf[(x, by)].set_style(Style::default().bg(bg));
                     }
                 }
             }
             let border = Style::default().fg(p.overlay0);
-            let top = y;
-            let bottom = y + box_h - 1;
-            draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
+            draw_tab_box_border(buf, bx, bw, top, bottom, border);
             for by in y..y + box_h {
                 buf[(card.rect.x, by)].set_symbol("▌");
                 buf[(card.rect.x, by)].set_style(rail);
@@ -1670,9 +1660,10 @@ fn render_workspace_list(
                             sx += display_width(e) as u16 + 1;
                         }
                         if ringed {
-                            // ◉ in the unseen-done blue: working, but the
-                            // wait is on subagents (Josh 2026-08-27)
-                            buf.set_string(sx, ry, "◉", Style::default().fg(p.teal));
+                            // yellow so the tab still reads working; the
+                            // ring shape says the wait is on subagents
+                            // (Josh 2026-08-27)
+                            buf.set_string(sx, ry, "◉", Style::default().fg(p.yellow));
                         } else {
                             buf.set_string(sx, ry, dot.0, dot.1);
                         }
@@ -1802,17 +1793,17 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        // spaces carry no titles; idle tabs are bordered boxes behind a rail,
-        // the active tab is a solid slab with no outline (Josh 2026-08-27)
+        // spaces carry no titles; every tab keeps its outline, the active
+        // tab's fill sits inside the lines (Josh 2026-08-27)
         assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), " ");
+        assert_eq!(buffer[(1, first_row)].symbol(), "┌");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
         assert_eq!(tab.fg, Some(app.palette.text));
         assert_eq!(tab.bg, Some(app.palette.surface_dim));
         let active_border = buffer[(1, first_row)].style();
-        assert_eq!(active_border.bg, Some(app.palette.surface_dim));
+        assert_ne!(active_border.bg, Some(app.palette.surface_dim));
 
         let idle_tab_row = second_row + 1;
         let idle = buffer[(find_symbol_x(buffer, idle_tab_row, 25, "s"), idle_tab_row)].style();
@@ -2119,10 +2110,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
         assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        // the selected tab's box is a solid slab: no outline, all cells filled
-        assert_eq!(buffer[(1, 5)].symbol(), " ");
-        assert_eq!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
-        assert_eq!(buffer[(5, 7)].style().bg, Some(app.palette.surface0));
+        // the selected tab keeps its outline; the fill sits inside it
+        assert_eq!(buffer[(1, 5)].symbol(), "┌");
+        assert_eq!(buffer[(5, 5)].symbol(), "┐");
+        assert_eq!(buffer[(5, 7)].symbol(), "┘");
+        assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
+        assert_eq!(buffer[(2, 6)].style().bg, Some(app.palette.surface0));
         assert_eq!(buffer[(3, 6)].symbol(), "●");
     }
 

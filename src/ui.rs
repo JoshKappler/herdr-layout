@@ -1065,11 +1065,7 @@ mod tests {
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
         // spaces no longer render titles; the tab box carries the content
-        // (the active tab renders as a solid slab, so its top row is blank)
-        assert!(
-            line1.starts_with("▌┌") || line1.trim_end() == "▌",
-            "box top: {line1:?}"
-        );
+        assert!(line1.starts_with("▌┌"), "box top: {line1:?}");
         assert!(!line2.contains("1 one"));
         assert!(line2.contains("shell"), "tab row: {line2:?}");
 
