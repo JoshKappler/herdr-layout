@@ -1,3 +1,17 @@
+# herdr, my layout
+
+This is my working fork of [herdr](https://github.com/ogulcancelik/herdr) (Apache-2.0),
+the agent multiplexer I live in. It runs my nine-plus parallel Claude Code sessions on
+one ultrawide, so the UI got rebuilt around that: a boxed-tab sidebar on a space rail,
+a live colored action line per session, a native right-side detail panel with the
+focused session's last prompt and reply read straight from the transcript, a minimize
+rail, and a drag-to-minimize divider. All of it is in the commits past the v0.7.5 tag.
+
+Upstream herdr is by [ogulcancelik](https://github.com/ogulcancelik); the original
+README follows.
+
+---
+
 # herdr
 
 
