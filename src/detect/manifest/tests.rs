@@ -737,6 +737,19 @@ fn claude_background_shell_bar_is_a_background_wait() {
 }
 
 #[test]
+fn claude_background_monitor_bar_is_a_background_wait() {
+    // captured live from an idle pane on 2026-08-27
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 37% · earlier prompt\n\
+        ⏵⏵ bypass permissions on · 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(result.bg_wait);
+}
+
+#[test]
 fn claude_live_turn_is_not_a_background_wait() {
     let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
         ────────────\n\
