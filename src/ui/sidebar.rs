@@ -223,9 +223,9 @@ pub(crate) struct TabDash {
 
 const TAB_LANE_KEYS: [&str; 7] = ["l1", "l2", "l3", "l4", "l5", "l6", "lmore"];
 
-/// The tab status cell, shared by both sidebars. Done-but-waiting (turn
-/// ended, subagents/shells/tasks still run) is a yellow center ringed in
-/// the done color: teal until viewed, green after (Josh 2026-08-27).
+/// The tab status cell, shared by both sidebars. The dot always wears the
+/// done color (teal unread, green read); the half-moon shape means
+/// background work still runs (Josh 2026-08-27).
 fn tab_status_cell(
     state: AgentState,
     seen: bool,
@@ -236,11 +236,8 @@ fn tab_status_cell(
     let done_waiting = (matches!(state, AgentState::Working) && bg_wait)
         || (matches!(state, AgentState::Idle) && subs_live);
     if done_waiting {
-        let ring = if seen { p.green } else { p.teal };
-        return ("○", Style::default().fg(ring).bg(p.yellow));
-    }
-    if matches!(state, AgentState::Working) && subs_live {
-        return ("◉", Style::default().fg(p.yellow));
+        let done = if seen { p.green } else { p.teal };
+        return ("◐", Style::default().fg(done));
     }
     state_dot(state, seen, p)
 }
@@ -415,8 +412,9 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
-/// Thin line box. Highlighted tabs fill only the interior, so the outline
-/// stays visible and the fill sits exactly inside it (Josh 2026-08-27).
+/// Thin line box, or when thick a half-block band whose inner edge meets the
+/// fill with no gap and whose outer edge sits where the thin line would
+/// (Josh 2026-08-27).
 fn draw_tab_box_border(
     buf: &mut ratatui::buffer::Buffer,
     bx: u16,
@@ -424,22 +422,33 @@ fn draw_tab_box_border(
     top: u16,
     bottom: u16,
     border: Style,
+    thick: bool,
 ) {
+    let (h_top, h_bottom, v_left, v_right) = if thick {
+        ("▄", "▀", "▐", "▌")
+    } else {
+        ("─", "─", "│", "│")
+    };
+    let (c_tl, c_tr, c_bl, c_br) = if thick {
+        ("▗", "▖", "▝", "▘")
+    } else {
+        ("┌", "┐", "└", "┘")
+    };
     for x in bx..bx + bw {
-        buf[(x, top)].set_symbol("─");
+        buf[(x, top)].set_symbol(h_top);
         buf[(x, top)].set_style(border);
-        buf[(x, bottom)].set_symbol("─");
+        buf[(x, bottom)].set_symbol(h_bottom);
         buf[(x, bottom)].set_style(border);
     }
-    buf[(bx, top)].set_symbol("┌");
-    buf[(bx + bw - 1, top)].set_symbol("┐");
-    buf[(bx, bottom)].set_symbol("└");
-    buf[(bx + bw - 1, bottom)].set_symbol("┘");
+    buf[(bx, top)].set_symbol(c_tl);
+    buf[(bx + bw - 1, top)].set_symbol(c_tr);
+    buf[(bx, bottom)].set_symbol(c_bl);
+    buf[(bx + bw - 1, bottom)].set_symbol(c_br);
     for by in top + 1..bottom {
-        for x in [bx, bx + bw - 1] {
-            buf[(x, by)].set_symbol("│");
-            buf[(x, by)].set_style(border);
-        }
+        buf[(bx, by)].set_symbol(v_left);
+        buf[(bx, by)].set_style(border);
+        buf[(bx + bw - 1, by)].set_symbol(v_right);
+        buf[(bx + bw - 1, by)].set_style(border);
     }
 }
 
@@ -1175,7 +1184,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             }
         }
         let border = Style::default().fg(p.overlay0);
-        draw_tab_box_border(buf, bx, bw, top, bottom, border);
+        draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
         let rail = Style::default().fg(space_rail_color(ws, p));
         for by in rect.y..rect.y + rect.height {
             buf[(rect.x, by)].set_symbol("▌");
@@ -1641,7 +1650,7 @@ fn render_workspace_list(
                 }
             }
             let border = Style::default().fg(p.overlay0);
-            draw_tab_box_border(buf, bx, bw, top, bottom, border);
+            draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
             for by in y..y + box_h {
                 buf[(card.rect.x, by)].set_symbol("▌");
                 buf[(card.rect.x, by)].set_style(rail);
@@ -1804,27 +1813,27 @@ mod tests {
         let p = crate::app::state::AppState::test_new().palette;
 
         let (sym, style) = tab_status_cell(AgentState::Working, false, true, false, &p);
-        assert_eq!(sym, "○");
+        assert_eq!(sym, "◐");
         assert_eq!(style.fg, Some(p.teal));
-        assert_eq!(style.bg, Some(p.yellow));
+        assert_eq!(style.bg, None);
 
         let (sym, style) = tab_status_cell(AgentState::Working, true, true, false, &p);
-        assert_eq!(sym, "○");
+        assert_eq!(sym, "◐");
         assert_eq!(style.fg, Some(p.green));
-        assert_eq!(style.bg, Some(p.yellow));
+        assert_eq!(style.bg, None);
 
         let (sym, style) = tab_status_cell(AgentState::Idle, false, false, true, &p);
-        assert_eq!(sym, "○");
+        assert_eq!(sym, "◐");
         assert_eq!(style.fg, Some(p.teal));
-        assert_eq!(style.bg, Some(p.yellow));
+        assert_eq!(style.bg, None);
 
         let (sym, style) = tab_status_cell(AgentState::Working, false, false, true, &p);
-        assert_eq!(sym, "◉");
+        assert_eq!(sym, "⬤");
         assert_eq!(style.fg, Some(p.yellow));
         assert_eq!(style.bg, None);
 
         let (sym, style) = tab_status_cell(AgentState::Idle, false, false, false, &p);
-        assert_eq!(sym, "●");
+        assert_eq!(sym, "⬤");
         assert_eq!(style.fg, Some(p.teal));
         assert_eq!(style.bg, None);
     }
@@ -1845,10 +1854,11 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        // spaces carry no titles; every tab keeps its outline, the active
-        // tab's fill sits inside the lines (Josh 2026-08-27)
+        // spaces carry no titles; the active tab's outline is the thick
+        // band, idle tabs keep the thin line box (Josh 2026-08-27)
         assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), "┌");
+        assert_eq!(buffer[(1, first_row)].symbol(), "▗");
+        assert_eq!(buffer[(1, second_row)].symbol(), "┌");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
@@ -2162,13 +2172,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
         assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        // the selected tab keeps its outline; the fill sits inside it
-        assert_eq!(buffer[(1, 5)].symbol(), "┌");
-        assert_eq!(buffer[(5, 5)].symbol(), "┐");
-        assert_eq!(buffer[(5, 7)].symbol(), "┘");
+        // the selected tab's outline is the thick band; the fill meets it
+        assert_eq!(buffer[(1, 5)].symbol(), "▗");
+        assert_eq!(buffer[(5, 5)].symbol(), "▖");
+        assert_eq!(buffer[(5, 7)].symbol(), "▘");
         assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
         assert_eq!(buffer[(2, 6)].style().bg, Some(app.palette.surface0));
-        assert_eq!(buffer[(3, 6)].symbol(), "●");
+        assert_eq!(buffer[(3, 6)].symbol(), "⬤");
     }
 
     #[test]

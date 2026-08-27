@@ -1064,8 +1064,9 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        // spaces no longer render titles; the tab box carries the content
-        assert!(line1.starts_with("▌┌"), "box top: {line1:?}");
+        // spaces no longer render titles; the tab box carries the content,
+        // and the selected tab's outline is the thick band
+        assert!(line1.starts_with("▌▗"), "box top: {line1:?}");
         assert!(!line2.contains("1 one"));
         assert!(line2.contains("shell"), "tab row: {line2:?}");
 
