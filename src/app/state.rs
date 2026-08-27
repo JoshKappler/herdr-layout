@@ -1481,6 +1481,8 @@ pub struct AppState {
     pub detail_panel_open: bool,
     pub detail_panel_scroll: usize,
     pub detail_panel: Option<crate::app::detail_panel::DetailPanelCache>,
+    /// subagent lane paths expanded in the detail panel's board
+    pub detail_panel_expanded: std::collections::HashSet<String>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1858,6 +1860,7 @@ impl AppState {
             detail_panel_open: false,
             detail_panel_scroll: 0,
             detail_panel: None,
+            detail_panel_expanded: std::collections::HashSet::new(),
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

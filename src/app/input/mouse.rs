@@ -524,6 +524,21 @@ impl AppState {
                 }
 
                 if self.over_detail_panel(mouse.column, mouse.row) {
+                    match crate::ui::detail_panel_hit(
+                        self,
+                        self.view.detail_panel_rect,
+                        mouse.row,
+                    ) {
+                        Some(crate::ui::DetailPanelHit::JumpFeed { query }) => {
+                            self.jump_feed_to_text(terminal_runtimes, &query);
+                        }
+                        Some(crate::ui::DetailPanelHit::ToggleSub { path }) => {
+                            if !self.detail_panel_expanded.remove(&path) {
+                                self.detail_panel_expanded.insert(path);
+                            }
+                        }
+                        None => {}
+                    }
                     return None;
                 }
 
@@ -1432,6 +1447,40 @@ impl AppState {
             && row < area.y + area.height
             && col >= area.x
             && col < area.x + area.width
+    }
+
+    /// Scrolls the focused pane so the feed line matching `query` sits at
+    /// the top of the viewport; the newest occurrence wins.
+    pub(super) fn jump_feed_to_text(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        query: &str,
+    ) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return;
+        };
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+        else {
+            return;
+        };
+        let Some(target) = rt.search_text_matches(query, false).last().copied() else {
+            return;
+        };
+        let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, pane_id) else {
+            return;
+        };
+        let offset = metrics
+            .max_offset_from_bottom
+            .saturating_sub(target.start.row as usize)
+            .min(metrics.max_offset_from_bottom);
+        self.set_pane_scroll_offset(terminal_runtimes, pane_id, offset);
     }
 
     pub(super) fn over_detail_panel(&self, col: u16, row: u16) -> bool {

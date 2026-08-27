@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 mod detail_panel;
-pub(crate) use self::detail_panel::detail_panel_max_scroll;
+pub(crate) use self::detail_panel::{detail_panel_hit, detail_panel_max_scroll, DetailPanelHit};
 mod dialogs;
 mod keybind_help;
 mod menus;
@@ -1065,7 +1065,11 @@ mod tests {
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
         // spaces no longer render titles; the tab box carries the content
-        assert!(line1.starts_with("▌┌"), "box top: {line1:?}");
+        // (the active tab's filled box uses half-block frame glyphs)
+        assert!(
+            line1.starts_with("▌┌") || line1.starts_with("▌▛"),
+            "box top: {line1:?}"
+        );
         assert!(!line2.contains("1 one"));
         assert!(line2.contains("shell"), "tab row: {line2:?}");
 

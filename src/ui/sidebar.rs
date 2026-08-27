@@ -214,6 +214,9 @@ pub(crate) struct TabDash {
     pub tab_idx: usize,
     pub state: AgentState,
     pub seen: bool,
+    /// live subagents under this tab: the dot gets a blue ring while the
+    /// parent works so a subagent wait is visible (Josh 2026-08-27)
+    pub subs_live: bool,
     pub rows: Vec<TabDashRow>,
 }
 
@@ -384,6 +387,42 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
+/// Thin line box normally; a highlighted box swaps to half-block edge glyphs
+/// so the frame hugs the fill exactly, with no dark margin inside the lines
+/// and no fill bleeding past them (Josh 2026-08-27).
+fn draw_tab_box_border(
+    buf: &mut ratatui::buffer::Buffer,
+    bx: u16,
+    bw: u16,
+    top: u16,
+    bottom: u16,
+    border: Style,
+    filled: bool,
+) {
+    let (h, v, tl, tr, bl, br) = if filled {
+        ("▀", "", "▛", "▜", "▙", "▟")
+    } else {
+        ("─", "│", "┌", "┐", "└", "┘")
+    };
+    let bh = if filled { "▄" } else { "─" };
+    for x in bx..bx + bw {
+        buf[(x, top)].set_symbol(h);
+        buf[(x, top)].set_style(border);
+        buf[(x, bottom)].set_symbol(bh);
+        buf[(x, bottom)].set_style(border);
+    }
+    buf[(bx, top)].set_symbol(tl);
+    buf[(bx + bw - 1, top)].set_symbol(tr);
+    buf[(bx, bottom)].set_symbol(bl);
+    buf[(bx + bw - 1, bottom)].set_symbol(br);
+    for by in top + 1..bottom {
+        for (x, side) in [(bx, if filled { "▌" } else { v }), (bx + bw - 1, if filled { "▐" } else { v })] {
+            buf[(x, by)].set_symbol(side);
+            buf[(x, by)].set_style(border);
+        }
+    }
+}
+
 pub(crate) fn tab_dashboards(
     app: &AppState,
     ws: &crate::workspace::Workspace,
@@ -451,6 +490,7 @@ pub(crate) fn tab_dashboards(
                 tab_idx,
                 state,
                 seen,
+                subs_live: toks.get("hdr").is_some_and(|h| h.contains(" sub")),
                 rows,
             }
         })
@@ -1116,29 +1156,26 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         let border = Style::default().fg(p.overlay0);
         let top = rect.y;
         let bottom = rect.y + rect.height - 1;
-        for x in bx..bx + bw {
-            buf[(x, top)].set_symbol("─");
-            buf[(x, top)].set_style(border);
-            buf[(x, bottom)].set_symbol("─");
-            buf[(x, bottom)].set_style(border);
-        }
-        buf[(bx, top)].set_symbol("┌");
-        buf[(bx + bw - 1, top)].set_symbol("┐");
-        buf[(bx, bottom)].set_symbol("└");
-        buf[(bx + bw - 1, bottom)].set_symbol("┘");
-        for by in top + 1..bottom {
-            buf[(bx, by)].set_symbol("│");
-            buf[(bx, by)].set_style(border);
-            buf[(bx + bw - 1, by)].set_symbol("│");
-            buf[(bx + bw - 1, by)].set_style(border);
-        }
+        draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
         let rail = Style::default().fg(space_rail_color(ws, p));
         for by in rect.y..rect.y + rect.height {
             buf[(rect.x, by)].set_symbol("▌");
             buf[(rect.x, by)].set_style(rail);
         }
         let (icon, icon_style) = state_dot(state, seen, p);
-        buf.set_string(bx + 2, top + 1, icon, icon_style);
+        let subs_live = tab
+            .metadata_tokens
+            .values()
+            .get("hdr")
+            .is_some_and(|h| h.contains(" sub"));
+        if subs_live && matches!(state, AgentState::Working) {
+            let ring = Style::default().fg(p.blue);
+            buf.set_string(bx + 1, top + 1, "(", ring);
+            buf.set_string(bx + 2, top + 1, icon, icon_style);
+            buf.set_string(bx + 3, top + 1, ")", ring);
+        } else {
+            buf.set_string(bx + 2, top + 1, icon, icon_style);
+        }
     }
 
     render_sidebar_toggle(app, frame, area, true, p);
@@ -1595,22 +1632,7 @@ fn render_workspace_list(
             let border = Style::default().fg(p.overlay0);
             let top = y;
             let bottom = y + box_h - 1;
-            for x in bx..bx + bw {
-                buf[(x, top)].set_symbol("─");
-                buf[(x, top)].set_style(border);
-                buf[(x, bottom)].set_symbol("─");
-                buf[(x, bottom)].set_style(border);
-            }
-            buf[(bx, top)].set_symbol("┌");
-            buf[(bx + bw - 1, top)].set_symbol("┐");
-            buf[(bx, bottom)].set_symbol("└");
-            buf[(bx + bw - 1, bottom)].set_symbol("┘");
-            for by in top + 1..bottom {
-                buf[(bx, by)].set_symbol("│");
-                buf[(bx, by)].set_style(border);
-                buf[(bx + bw - 1, by)].set_symbol("│");
-                buf[(bx + bw - 1, by)].set_style(border);
-            }
+            draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
             for by in y..y + box_h {
                 buf[(card.rect.x, by)].set_symbol("▌");
                 buf[(card.rect.x, by)].set_style(rail);
@@ -1636,7 +1658,10 @@ fn render_workspace_list(
                             .then_some(*since_ms)
                             .flatten()
                             .map(fmt_elapsed);
+                        let ringed =
+                            dash.subs_live && matches!(dash.state, AgentState::Working);
                         let status_width = 1
+                            + usize::from(ringed) * 2
                             + elapsed.as_ref().map(|e| display_width(e) + 1).unwrap_or(0);
                         let text_w =
                             inner_w.saturating_sub(status_width as u16 + 1);
@@ -1651,7 +1676,14 @@ fn render_workspace_list(
                             buf.set_string(sx, ry, e, Style::default().fg(p.subtext0));
                             sx += display_width(e) as u16 + 1;
                         }
-                        buf.set_string(sx, ry, dot.0, dot.1);
+                        if ringed {
+                            let ring = Style::default().fg(p.blue);
+                            buf.set_string(sx, ry, "(", ring);
+                            buf.set_string(sx + 1, ry, dot.0, dot.1);
+                            buf.set_string(sx + 2, ry, ")", ring);
+                        } else {
+                            buf.set_string(sx, ry, dot.0, dot.1);
+                        }
                     }
                     TabDashRow::TitleCont { text, tint_at } => {
                         draw_tab_line(
@@ -1782,7 +1814,7 @@ mod tests {
         // and the active tab's whole box, borders included, gets the
         // backdrop (Josh 2026-08-27)
         assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), "┌");
+        assert_eq!(buffer[(1, first_row)].symbol(), "▛");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
@@ -2096,8 +2128,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
         assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        assert_eq!(buffer[(1, 5)].symbol(), "┌");
-        assert_eq!(buffer[(5, 7)].symbol(), "┘");
+        // the active tab's filled box wears the half-block frame
+        assert_eq!(buffer[(1, 5)].symbol(), "▛");
+        assert_eq!(buffer[(5, 7)].symbol(), "▟");
         assert_eq!(buffer[(3, 6)].symbol(), "●");
     }
 

@@ -29,6 +29,8 @@ pub struct Timeline {
     pub current: Vec<TimelineItem>,
     #[serde(default)]
     pub next: Vec<String>,
+    #[serde(default)]
+    pub subs: Vec<SubLane>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -37,11 +39,25 @@ pub struct TimelineItem {
     #[serde(default)]
     pub label: String,
     #[serde(default)]
+    pub head: String,
+    #[serde(default)]
     pub ts: f64,
     #[serde(default)]
     pub secs: Option<f64>,
     #[serde(default)]
     pub off: u64,
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub struct SubLane {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub started: f64,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub events: Vec<String>,
 }
 
 #[cfg(test)]

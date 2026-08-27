@@ -686,6 +686,20 @@ fn claude_blocker_screen_outranks_osc_idle_title() {
 }
 
 #[test]
+fn claude_blocker_screen_outranks_osc_working_title() {
+    // An on-screen input prompt must go red even while the title still
+    // spins (Josh 2026-08-27): blocked at 980/850 beats osc_title_working
+    // at 970.
+    let blocker_screen = "do you want to proceed?\n\
+        bash command: rm -rf /tmp/test\n\
+        ❯ 1. Yes\n   2. No\n\n\
+        Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    let result = osc_explain(Agent::Claude, blocker_screen, "⠂ project", "");
+    assert_eq!(result.state, AgentState::Blocked);
+    assert!(result.visible_blocker);
+}
+
+#[test]
 fn claude_empty_osc_empty_screen_is_idle_fallback() {
     // No OSC data, no matching screen rule → fallback idle (unchanged V3 behavior)
     let result = osc_explain(Agent::Claude, "", "", "");

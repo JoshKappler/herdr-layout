@@ -4,10 +4,12 @@ min_engine_version = 2
 updated_at = "2026-07-13T00:00:00Z"
 aliases = ["claude-code"]
 
+# below the blocked rules (980): an on-screen input prompt must go red even
+# while the title still spins (Josh 2026-08-27)
 [[rules]]
 id = "osc_title_working"
 state = "working"
-priority = 1100
+priority = 970
 region = "osc_title"
 visible_working = true
 regex = ['^[\x{2800}-\x{28FF}] ']
@@ -91,7 +93,7 @@ not = [
 [[rules]]
 id = "bash_permission_prompt"
 state = "blocked"
-priority = 850
+priority = 984
 region = "whole_recent"
 visible_blocker = true
 contains = ["do you want to proceed?"]
@@ -109,7 +111,7 @@ all = [
 [[rules]]
 id = "generic_permission_prompt"
 state = "blocked"
-priority = 840
+priority = 983
 region = "after_last_horizontal_rule"
 visible_blocker = true
 contains = ["do you want to proceed?", "esc to cancel"]

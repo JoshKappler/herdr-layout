@@ -54,21 +54,60 @@ fn max_scroll_for(lines: &[Line<'_>], content: Rect) -> usize {
     lines.len().saturating_sub(content.height as usize)
 }
 
+/// What a click on a panel line should do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DetailPanelHit {
+    JumpFeed { query: String },
+    ToggleSub { path: String },
+}
+
+pub(crate) fn detail_panel_hit(app: &AppState, area: Rect, row: u16) -> Option<DetailPanelHit> {
+    let content = content_rect(area);
+    if row < content.y || row >= content.y + content.height {
+        return None;
+    }
+    let (lines, hits) = detail_panel_lines_with_hits(app, content.width);
+    let scroll = app.detail_panel_scroll.min(max_scroll_for(&lines, content));
+    let line_idx = (row - content.y) as usize + scroll;
+    hits.into_iter().nth(line_idx).flatten()
+}
+
+/// The first words of a prompt, short enough to sit on one feed line.
+fn feed_query(head: &str) -> Option<String> {
+    let first = head.lines().next().unwrap_or("").trim();
+    let mut query: String = first.chars().take(30).collect();
+    if query.len() < first.len() {
+        if let Some(cut) = query.rfind(' ') {
+            query.truncate(cut);
+        }
+    }
+    let query = query.trim().to_string();
+    (query.chars().count() >= 8).then_some(query)
+}
+
 fn detail_panel_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
+    detail_panel_lines_with_hits(app, width).0
+}
+
+type PanelLines = (Vec<Line<'static>>, Vec<Option<DetailPanelHit>>);
+
+fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
     let p = &app.palette;
     let dim = Style::default().fg(p.subtext0);
     let mut lines = Vec::new();
+    let mut hits: Vec<Option<DetailPanelHit>> = Vec::new();
 
     let Some(cache) = &app.detail_panel else {
         lines.push(Line::from(Span::styled("no agent session in this pane", dim)));
-        return lines;
+        return (lines, vec![None]);
     };
     let Some(tl) = &cache.timeline else {
         lines.push(Line::from(Span::styled("timeline pending", dim)));
-        return lines;
+        return (lines, vec![None]);
     };
 
     lines.push(Line::from(Span::styled(aggregate_line(tl), dim)));
+    hits.push(None);
     let now = now_epoch();
     for item in &tl.done {
         lines.push(item_line(
@@ -79,15 +118,38 @@ fn detail_panel_lines(app: &AppState, width: u16) -> Vec<Line<'static>> {
             width,
             p,
         ));
+        hits.push(feed_query(&item.head).map(|query| DetailPanelHit::JumpFeed { query }));
     }
     for item in &tl.current {
         let running = (item.ts > 0.0).then(|| fmt_secs(now - item.ts));
         lines.push(item_line("●", &item.label, running, p.yellow, width, p));
+        hits.push(feed_query(&item.head).map(|query| DetailPanelHit::JumpFeed { query }));
     }
     for label in &tl.next {
         lines.push(item_line("◇", label, None, p.mauve, width, p));
+        hits.push(None);
     }
-    lines
+
+    if !tl.subs.is_empty() {
+        lines.push(Line::default());
+        hits.push(None);
+        lines.push(section_header("subagents", width, p));
+        hits.push(None);
+        for sub in &tl.subs {
+            let running = (sub.started > 0.0).then(|| fmt_secs(now - sub.started));
+            lines.push(item_line("●", &sub.label, running, p.yellow, width, p));
+            hits.push(Some(DetailPanelHit::ToggleSub {
+                path: sub.path.clone(),
+            }));
+            if app.detail_panel_expanded.contains(&sub.path) {
+                for event in &sub.events {
+                    lines.push(Line::from(Span::styled(format!("   {event}"), dim)));
+                    hits.push(None);
+                }
+            }
+        }
+    }
+    (lines, hits)
 }
 
 fn aggregate_line(tl: &Timeline) -> String {
@@ -129,6 +191,13 @@ fn item_line(
         spans.push(Span::styled(right, dim));
     }
     Line::from(spans)
+}
+
+fn section_header(title: &str, width: u16, p: &Palette) -> Line<'static> {
+    let style = Style::default().fg(p.overlay0);
+    let label = format!("─ {title} ");
+    let fill = (width as usize).saturating_sub(display_width(&label));
+    Line::from(Span::styled(format!("{label}{}", "─".repeat(fill)), style))
 }
 
 fn now_epoch() -> f64 {
@@ -177,6 +246,7 @@ mod tests {
         let item = |u: &str, label: &str, secs| TimelineItem {
             u: u.into(),
             label: label.into(),
+            head: format!("please {label} soon"),
             ts: 100.0,
             secs,
             off: 0,
@@ -191,7 +261,44 @@ mod tests {
             ],
             current: vec![item("u3", "building the panel", None)],
             next: vec!["ship the teardown".into()],
+            subs: vec![crate::app::detail_panel::SubLane {
+                label: "writing allocation unit tests".into(),
+                started: 50.0,
+                path: "/tmp/lane.jsonl".into(),
+                events: vec!["18:59 Write sandboxProbe.ts".into()],
+            }],
         }
+    }
+
+    #[test]
+    fn panel_hits_map_tasks_and_subs_through_scroll() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.active = Some(0);
+        app.detail_panel_open = true;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 180, 40));
+        let rect = app.view.detail_panel_rect;
+        app.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(test_timeline()),
+        );
+
+        let content = content_rect(rect);
+        assert_eq!(detail_panel_hit(&app, rect, content.y), None);
+        assert_eq!(
+            detail_panel_hit(&app, rect, content.y + 1),
+            Some(DetailPanelHit::JumpFeed {
+                query: "please restored the configs".into()
+            })
+        );
+        // purple prediction row is not clickable
+        assert_eq!(detail_panel_hit(&app, rect, content.y + 4), None);
+        // blank + header, then the subagent row toggles its expansion
+        assert_eq!(
+            detail_panel_hit(&app, rect, content.y + 7),
+            Some(DetailPanelHit::ToggleSub {
+                path: "/tmp/lane.jsonl".into()
+            })
+        );
     }
 
     #[test]
