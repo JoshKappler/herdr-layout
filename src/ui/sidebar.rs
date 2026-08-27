@@ -387,9 +387,9 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
-/// Thin line box normally; a highlighted box swaps to half-block edge glyphs
-/// so the frame hugs the fill exactly, with no dark margin inside the lines
-/// and no fill bleeding past them (Josh 2026-08-27).
+/// Thin line box normally; a highlighted box renders as a solid slab
+/// instead (the fill is painted, no outline drawn), so the highlight is one
+/// clean rectangle with nothing to misalign (Josh 2026-08-27).
 fn draw_tab_box_border(
     buf: &mut ratatui::buffer::Buffer,
     bx: u16,
@@ -399,25 +399,22 @@ fn draw_tab_box_border(
     border: Style,
     filled: bool,
 ) {
-    let (h, v, tl, tr, bl, br) = if filled {
-        ("▀", "", "▛", "▜", "▙", "▟")
-    } else {
-        ("─", "│", "┌", "┐", "└", "┘")
-    };
-    let bh = if filled { "▄" } else { "─" };
+    if filled {
+        return;
+    }
     for x in bx..bx + bw {
-        buf[(x, top)].set_symbol(h);
+        buf[(x, top)].set_symbol("─");
         buf[(x, top)].set_style(border);
-        buf[(x, bottom)].set_symbol(bh);
+        buf[(x, bottom)].set_symbol("─");
         buf[(x, bottom)].set_style(border);
     }
-    buf[(bx, top)].set_symbol(tl);
-    buf[(bx + bw - 1, top)].set_symbol(tr);
-    buf[(bx, bottom)].set_symbol(bl);
-    buf[(bx + bw - 1, bottom)].set_symbol(br);
+    buf[(bx, top)].set_symbol("┌");
+    buf[(bx + bw - 1, top)].set_symbol("┐");
+    buf[(bx, bottom)].set_symbol("└");
+    buf[(bx + bw - 1, bottom)].set_symbol("┘");
     for by in top + 1..bottom {
-        for (x, side) in [(bx, if filled { "▌" } else { v }), (bx + bw - 1, if filled { "▐" } else { v })] {
-            buf[(x, by)].set_symbol(side);
+        for x in [bx, bx + bw - 1] {
+            buf[(x, by)].set_symbol("│");
             buf[(x, by)].set_style(border);
         }
     }
@@ -1169,10 +1166,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             .get("hdr")
             .is_some_and(|h| h.contains(" sub"));
         if subs_live && matches!(state, AgentState::Working) {
-            let ring = Style::default().fg(p.blue);
-            buf.set_string(bx + 1, top + 1, "(", ring);
-            buf.set_string(bx + 2, top + 1, icon, icon_style);
-            buf.set_string(bx + 3, top + 1, ")", ring);
+            buf.set_string(bx + 2, top + 1, "◉", Style::default().fg(p.teal));
         } else {
             buf.set_string(bx + 2, top + 1, icon, icon_style);
         }
@@ -1661,7 +1655,6 @@ fn render_workspace_list(
                         let ringed =
                             dash.subs_live && matches!(dash.state, AgentState::Working);
                         let status_width = 1
-                            + usize::from(ringed) * 2
                             + elapsed.as_ref().map(|e| display_width(e) + 1).unwrap_or(0);
                         let text_w =
                             inner_w.saturating_sub(status_width as u16 + 1);
@@ -1677,10 +1670,9 @@ fn render_workspace_list(
                             sx += display_width(e) as u16 + 1;
                         }
                         if ringed {
-                            let ring = Style::default().fg(p.blue);
-                            buf.set_string(sx, ry, "(", ring);
-                            buf.set_string(sx + 1, ry, dot.0, dot.1);
-                            buf.set_string(sx + 2, ry, ")", ring);
+                            // ◉ in the unseen-done blue: working, but the
+                            // wait is on subagents (Josh 2026-08-27)
+                            buf.set_string(sx, ry, "◉", Style::default().fg(p.teal));
                         } else {
                             buf.set_string(sx, ry, dot.0, dot.1);
                         }
@@ -1810,11 +1802,10 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        // spaces carry no titles; each tab is a bordered box behind a rail,
-        // and the active tab's whole box, borders included, gets the
-        // backdrop (Josh 2026-08-27)
+        // spaces carry no titles; idle tabs are bordered boxes behind a rail,
+        // the active tab is a solid slab with no outline (Josh 2026-08-27)
         assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), "▛");
+        assert_eq!(buffer[(1, first_row)].symbol(), " ");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
@@ -2128,9 +2119,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
         assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        // the active tab's filled box wears the half-block frame
-        assert_eq!(buffer[(1, 5)].symbol(), "▛");
-        assert_eq!(buffer[(5, 7)].symbol(), "▟");
+        // the selected tab's box is a solid slab: no outline, all cells filled
+        assert_eq!(buffer[(1, 5)].symbol(), " ");
+        assert_eq!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
+        assert_eq!(buffer[(5, 7)].style().bg, Some(app.palette.surface0));
         assert_eq!(buffer[(3, 6)].symbol(), "●");
     }
 
