@@ -914,6 +914,258 @@ fn claude_empty_osc_empty_screen_is_idle_fallback() {
     assert!(!result.visible_idle);
 }
 
+// --- Claude handoff needs-you rule ---
+// a finished turn that declares merge or approval readiness must read
+// Blocked (red dot + siren) instead of the casual done (Josh 2026-08-27)
+
+#[test]
+fn claude_merge_ready_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "Local: lint, typecheck, vitest 42 passed on 4a91c2e.\n\
+        The branch is pushed and the PR is ready to merge.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_approval_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "CI is green, both bot findings are closed, and the PR is awaiting your approval.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_gated_merge_click_handoff_is_blocked() {
+    let screen = "Everything is green; the branch is awaiting your merge click.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_sign_off_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "The stack is repacked and ready for your sign-off.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_needs_you_marker_line_is_blocked() {
+    let screen = "NEEDS YOU: the release PR has human review as the last gate.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_ready_text_during_live_turn_stays_working() {
+    // the spinner row outranks the handoff rule, so mid-turn text about
+    // readiness never fires the siren
+    let screen = "The PR is ready to merge.\n\
+        \u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens · thought for 12s)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_turn_working")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_ready_text_with_esc_to_interrupt_frame_is_not_blocked() {
+    // this spinner frame matches no working rule, so the handoff rule's own
+    // not gate is what keeps the siren quiet
+    let screen = "The PR is ready to merge.\n\
+        \u{2733} Simmering\u{2026} (esc to interrupt)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_ordinary_done_message_stays_idle() {
+    // mentions merge and approval as plain words; a naive contains rule
+    // would wrongly fire here
+    let screen = "Renamed the merge helper, tightened the approval flow docs, and pushed.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(result.visible_idle);
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_click_status_report_stays_idle() {
+    // a status report is not a readiness declaration (Josh 2026-08-27)
+    let screen =
+        "What's left after this round: the reviewer's re-approval and your merge click.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_approval_process_explanation_stays_idle() {
+    let screen =
+        "The review pipeline here: the bot reads the diff first, then a human reviews the merge.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_phrase_typed_in_prompt_box_stays_idle() {
+    // above_prompt_box excludes the box body, so typed text cannot trigger
+    // the handoff rule
+    let screen = "Renamed the helper and pushed.\n\
+        ────────────\n\
+        ❯ say ready to merge when the checks finish\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_lowercase_needs_you_prose_stays_idle() {
+    // the opt-in marker is caps only and line anchored
+    let screen = "This branch still needs you to set the sandbox key before tests run.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
+}
+
 // --- Codex OSC rules ---
 
 #[test]

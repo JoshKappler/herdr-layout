@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.08.27.3"
+version = "2026.08.28.1"
 min_engine_version = 2
-updated_at = "2026-08-27T00:00:00Z"
+updated_at = "2026-08-28T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -144,6 +144,37 @@ priority = 980
 region = "whole_recent"
 visible_blocker = true
 contains = ["run a dynamic workflow?", "esc to cancel"]
+
+[[rules]]
+id = "handoff_needs_you"
+state = "blocked"
+priority = 955
+region = "above_prompt_box"
+visible_blocker = true
+# a finished turn declaring merge or approval readiness gets the needs-you
+# siren instead of the casual done chime (Josh 2026-08-27); the region
+# excludes the prompt box body so typed text cannot trigger it
+any = [
+  { contains = ["ready to merge"] },
+  { contains = ["ready for merge"] },
+  { contains = ["ready for your merge"] },
+  { contains = ["merge-ready"] },
+  { contains = ["awaiting your approval"] },
+  { contains = ["awaiting approval"] },
+  { contains = ["ready for approval"] },
+  { contains = ["ready to send for approval"] },
+  { contains = ["send off for approval"] },
+  { contains = ["approval is the one thing left"] },
+  { regex = ['(?i)(?:needs|ready for) your sign-off'] },
+  # "your merge click" counts only when a readiness clause precedes it
+  { regex = ['(?i)(?:awaiting|ready for) your merge click'] },
+  { regex = ['(?i)one thing left\b[^\n]{0,60}?your merge click'] },
+  # deliberate opt-in marker, caps only
+  { line_regex = ['^\s*NEEDS YOU\b'] },
+]
+not = [
+  { contains = ["esc to interrupt"] },
+]
 
 [[rules]]
 id = "live_prompt_box"
