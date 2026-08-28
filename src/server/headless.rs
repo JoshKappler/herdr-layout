@@ -6087,6 +6087,56 @@ next_tab = ""
     }
 
     #[test]
+    fn virtual_render_keeps_btw_button_through_hook_authority_lapse() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("btw-latch");
+        let pane_id = ws.tabs[0].root_pane;
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).cloned().unwrap();
+        {
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.hook_authority = Some(crate::terminal::state::HookAuthority {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                reported_at: std::time::Instant::now(),
+                session_ref: Some(
+                    crate::agent_resume::AgentSessionRef::id("latch-session").unwrap(),
+                ),
+            });
+        }
+
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        let visible = state.btw_fork_button_rect();
+        assert_ne!(
+            visible,
+            Rect::default(),
+            "button shows for a live claude session"
+        );
+
+        // authority lapses for a frame while output streams; detection blanks too
+        {
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.hook_authority = None;
+            terminal.persisted_agent_session = None;
+            terminal.detected_agent = None;
+        }
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        assert_eq!(
+            state.btw_fork_button_rect(),
+            visible,
+            "an authority lapse on the live render path must not blink the button"
+        );
+    }
+
+    #[test]
     fn virtual_render_without_frame_cursor_keeps_cursor_hidden() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);

@@ -133,7 +133,6 @@ pub fn compute_view_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
 ) {
-    app.refresh_btw_session_latch();
     compute_view_internal(
         app,
         terminal_runtimes,
@@ -227,6 +226,10 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    // Every render path must refresh the latch: the headless server renders
+    // through the cell-size and no-resize entry points, and a latch that only
+    // moves on the default path blinks the btw button during streaming.
+    app.refresh_btw_session_latch();
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
