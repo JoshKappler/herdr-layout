@@ -568,6 +568,7 @@ impl App {
             detail_panel: None,
             detail_panel_expanded: std::collections::HashSet::new(),
             detail_panel_pinned: None,
+            btw_session_latch: None,
             detail_panel_cycle: 0,
             detail_panel_cycle_at: None,
             detail_panel_viewer_scroll: 0,

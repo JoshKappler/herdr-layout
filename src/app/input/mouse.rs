@@ -1627,10 +1627,13 @@ impl AppState {
 
     /// Session id of the focused pane's agent session when it is a resumable
     /// Claude session; the btw fork button only exists for those.
-    pub(crate) fn focused_pane_claude_session_id(&self) -> Option<String> {
+    fn focused_terminal_id(&self) -> Option<&crate::terminal::TerminalId> {
         let ws = self.active.and_then(|ws_idx| self.workspaces.get(ws_idx))?;
-        let terminal_id = ws.terminal_id(ws.focused_pane_id()?)?;
-        let terminal = self.terminals.get(terminal_id)?;
+        ws.terminal_id(ws.focused_pane_id()?)
+    }
+
+    fn live_focused_pane_claude_session_id(&self) -> Option<String> {
+        let terminal = self.terminals.get(self.focused_terminal_id()?)?;
         let (source, agent, session_ref) = match terminal.hook_authority.as_ref() {
             Some(authority) if authority.session_ref.is_some() => (
                 authority.source.as_str(),
@@ -1648,6 +1651,48 @@ impl AppState {
         };
         (agent == "claude" && crate::agent_resume::plan(source, agent, session_ref).is_some())
             .then(|| session_ref.value.clone())
+    }
+
+    /// Once a claude session is confirmed for the focused terminal, keep
+    /// answering with it while hook authority lapses and re-reports, which
+    /// otherwise blinks the btw button; the latch drops when the terminal's
+    /// effective agent stops reading claude or focus moves terminals.
+    pub(crate) fn refresh_btw_session_latch(&mut self) {
+        let Some(terminal_id) = self.focused_terminal_id().cloned() else {
+            self.btw_session_latch = None;
+            return;
+        };
+        if let Some(session_id) = self.live_focused_pane_claude_session_id() {
+            self.btw_session_latch = Some((terminal_id, session_id));
+            return;
+        }
+        let keep = self
+            .btw_session_latch
+            .as_ref()
+            .is_some_and(|(latched, _)| *latched == terminal_id)
+            && self
+                .terminals
+                .get(&terminal_id)
+                .and_then(|terminal| terminal.effective_agent_label())
+                == Some("claude");
+        if !keep {
+            self.btw_session_latch = None;
+        }
+    }
+
+    pub(crate) fn focused_pane_claude_session_id(&self) -> Option<String> {
+        if let Some(session_id) = self.live_focused_pane_claude_session_id() {
+            return Some(session_id);
+        }
+        let terminal_id = self.focused_terminal_id()?;
+        let (latched, session_id) = self.btw_session_latch.as_ref()?;
+        (latched == terminal_id
+            && self
+                .terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.effective_agent_label())
+                == Some("claude"))
+        .then(|| session_id.clone())
     }
 
     /// The btw fork button in the top-right corner of the terminal area.
@@ -4481,6 +4526,62 @@ mod tests {
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
         }
+    }
+
+    #[test]
+    fn btw_fork_button_holds_through_hook_authority_lapse() {
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("btw-latch");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        let area = app.state.view.terminal_area;
+        let visible = Rect::new(area.x + area.width - 7, area.y, 7, 3);
+
+        // live turn: hook authority holds the session, persisted is cleared
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.persisted_agent_session = None;
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.hook_authority = Some(crate::terminal::state::HookAuthority {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                reported_at: std::time::Instant::now(),
+                session_ref: Some(
+                    crate::agent_resume::AgentSessionRef::id("latch-session").unwrap(),
+                ),
+            });
+        }
+        app.state.refresh_btw_session_latch();
+        assert_eq!(app.state.btw_fork_button_rect(), visible);
+
+        // authority lapses with nothing persisted; detection still says claude
+        app.state.terminals.get_mut(&terminal_id).unwrap().hook_authority = None;
+        app.state.refresh_btw_session_latch();
+        assert_eq!(
+            app.state.btw_fork_button_rect(),
+            visible,
+            "an authority lapse must not blink the button"
+        );
+        assert_eq!(
+            app.state.focused_pane_claude_session_id().as_deref(),
+            Some("latch-session"),
+            "clicks during the lapse fork the latched session"
+        );
+
+        // the agent actually leaves the pane: latch drops, button hides
+        app.state.terminals.get_mut(&terminal_id).unwrap().detected_agent = None;
+        app.state.refresh_btw_session_latch();
+        assert_eq!(app.state.btw_fork_button_rect(), Rect::default());
+        assert_eq!(app.state.focused_pane_claude_session_id(), None);
     }
 
     #[test]

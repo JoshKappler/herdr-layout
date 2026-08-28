@@ -1485,6 +1485,9 @@ pub struct AppState {
     pub detail_panel_expanded: std::collections::HashSet<String>,
     /// exchange uuid the prompt viewer is pinned to; None cycles
     pub detail_panel_pinned: Option<String>,
+    /// last confirmed claude session for the focused terminal; bridges the
+    /// gaps while hook authority lapses so the btw button holds steady
+    pub btw_session_latch: Option<(crate::terminal::TerminalId, String)>,
     pub detail_panel_cycle: usize,
     pub detail_panel_cycle_at: Option<std::time::Instant>,
     /// prompt viewer body scroll; resets when the shown exchange changes
@@ -1869,6 +1872,7 @@ impl AppState {
             detail_panel: None,
             detail_panel_expanded: std::collections::HashSet::new(),
             detail_panel_pinned: None,
+            btw_session_latch: None,
             detail_panel_cycle: 0,
             detail_panel_cycle_at: None,
             detail_panel_viewer_scroll: 0,

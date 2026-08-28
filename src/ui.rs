@@ -133,6 +133,7 @@ pub fn compute_view_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
 ) {
+    app.refresh_btw_session_latch();
     compute_view_internal(
         app,
         terminal_runtimes,
