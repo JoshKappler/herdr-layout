@@ -109,6 +109,12 @@ fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
     lines.push(Line::from(Span::styled(aggregate_line(tl), dim)));
     hits.push(None);
     let now = now_epoch();
+    if !(tl.done.is_empty() && tl.current.is_empty() && tl.next.is_empty()) {
+        lines.push(Line::default());
+        hits.push(None);
+        lines.push(section_header("tasks", width, p));
+        hits.push(None);
+    }
     for item in &tl.done {
         lines.push(item_line(
             "✓",
@@ -136,11 +142,11 @@ fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
         lines.push(section_header("subagents", width, p));
         hits.push(None);
         for sub in &tl.subs {
-            // finished lanes stay listed: teal like a done tab, total runtime
+            // finished lanes stay listed: green like a done task, total runtime
             let (color, clock) = if sub.status == "done" {
                 let total = (sub.started > 0.0 && sub.ended > sub.started)
                     .then(|| fmt_secs(sub.ended - sub.started));
-                (p.teal, total)
+                (p.green, total)
             } else {
                 (
                     p.yellow,
@@ -306,23 +312,25 @@ mod tests {
 
         let content = content_rect(rect);
         assert_eq!(detail_panel_hit(&app, rect, content.y), None);
+        // blank + tasks header, then the first done row jumps the feed
+        assert_eq!(detail_panel_hit(&app, rect, content.y + 2), None);
         assert_eq!(
-            detail_panel_hit(&app, rect, content.y + 1),
+            detail_panel_hit(&app, rect, content.y + 3),
             Some(DetailPanelHit::JumpFeed {
                 query: "please restored the configs".into()
             })
         );
         // purple prediction row is not clickable
-        assert_eq!(detail_panel_hit(&app, rect, content.y + 4), None);
+        assert_eq!(detail_panel_hit(&app, rect, content.y + 6), None);
         // blank + header, then live and finished subagent rows both toggle
         assert_eq!(
-            detail_panel_hit(&app, rect, content.y + 7),
+            detail_panel_hit(&app, rect, content.y + 9),
             Some(DetailPanelHit::ToggleSub {
                 path: "/tmp/lane.jsonl".into()
             })
         );
         assert_eq!(
-            detail_panel_hit(&app, rect, content.y + 8),
+            detail_panel_hit(&app, rect, content.y + 10),
             Some(DetailPanelHit::ToggleSub {
                 path: "/tmp/lane-done.jsonl".into()
             })
@@ -356,43 +364,49 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(rect.x, 5)].symbol(), "│");
         let content = content_rect(rect);
-        assert_eq!(buffer[(content.x, content.y + 1)].symbol(), "✓");
+        // tasks header sits above the item rows, same shape as subagents
+        let header: String = (content.x..content.x + 9)
+            .map(|x| buffer[(x, content.y + 2)].symbol())
+            .collect();
+        assert_eq!(header, "─ tasks ─");
         assert_eq!(
-            buffer[(content.x, content.y + 1)].style().fg,
+            buffer[(content.x, content.y + 2)].style().fg,
+            Some(app.palette.overlay0)
+        );
+        assert_eq!(buffer[(content.x, content.y + 3)].symbol(), "✓");
+        assert_eq!(
+            buffer[(content.x, content.y + 3)].style().fg,
             Some(app.palette.green)
         );
         // unlabeled item renders the placeholder, dim, not raw prompt words
+        assert_eq!(buffer[(content.x + 2, content.y + 4)].symbol(), "s");
         assert_eq!(
-            buffer[(content.x + 2, content.y + 2)].symbol(),
-            "s"
-        );
-        assert_eq!(
-            buffer[(content.x + 2, content.y + 2)].style().fg,
+            buffer[(content.x + 2, content.y + 4)].style().fg,
             Some(app.palette.subtext0)
         );
         assert_eq!(
-            buffer[(content.x, content.y + 3)].style().fg,
+            buffer[(content.x, content.y + 5)].style().fg,
             Some(app.palette.yellow)
         );
         assert_eq!(
-            buffer[(content.x, content.y + 4)].style().fg,
+            buffer[(content.x, content.y + 6)].style().fg,
             Some(app.palette.mauve)
         );
-        // subagent board: live lane yellow, finished lane teal with runtime
+        // subagent board: live lane yellow, finished lane green with runtime
         assert_eq!(
-            buffer[(content.x, content.y + 7)].style().fg,
+            buffer[(content.x, content.y + 9)].style().fg,
             Some(app.palette.yellow)
         );
         assert_eq!(
-            buffer[(content.x, content.y + 8)].style().fg,
-            Some(app.palette.teal)
+            buffer[(content.x, content.y + 10)].style().fg,
+            Some(app.palette.green)
         );
         assert_eq!(
-            buffer[(content.x + content.width - 3, content.y + 8)].symbol(),
+            buffer[(content.x + content.width - 3, content.y + 10)].symbol(),
             "4"
         );
         assert_eq!(
-            buffer[(content.x + content.width - 1, content.y + 8)].symbol(),
+            buffer[(content.x + content.width - 1, content.y + 10)].symbol(),
             "s"
         );
     }
