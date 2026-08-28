@@ -411,9 +411,7 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
-/// Thin line box, or when thick a half-block band whose inner edge meets the
-/// fill with no gap and whose outer edge sits where the thin line would
-/// (Josh 2026-08-27).
+/// Thin line box for plain tabs.
 fn draw_tab_box_border(
     buf: &mut ratatui::buffer::Buffer,
     bx: u16,
@@ -421,33 +419,55 @@ fn draw_tab_box_border(
     top: u16,
     bottom: u16,
     border: Style,
-    thick: bool,
 ) {
-    let (h_top, h_bottom, v_left, v_right) = if thick {
-        ("▄", "▀", "▐", "▌")
-    } else {
-        ("─", "─", "│", "│")
-    };
-    let (c_tl, c_tr, c_bl, c_br) = if thick {
-        ("▗", "▖", "▝", "▘")
-    } else {
-        ("┌", "┐", "└", "┘")
-    };
     for x in bx..bx + bw {
-        buf[(x, top)].set_symbol(h_top);
+        buf[(x, top)].set_symbol("─");
         buf[(x, top)].set_style(border);
-        buf[(x, bottom)].set_symbol(h_bottom);
+        buf[(x, bottom)].set_symbol("─");
         buf[(x, bottom)].set_style(border);
     }
-    buf[(bx, top)].set_symbol(c_tl);
-    buf[(bx + bw - 1, top)].set_symbol(c_tr);
-    buf[(bx, bottom)].set_symbol(c_bl);
-    buf[(bx + bw - 1, bottom)].set_symbol(c_br);
+    buf[(bx, top)].set_symbol("┌");
+    buf[(bx + bw - 1, top)].set_symbol("┐");
+    buf[(bx, bottom)].set_symbol("└");
+    buf[(bx + bw - 1, bottom)].set_symbol("┘");
     for by in top + 1..bottom {
-        buf[(bx, by)].set_symbol(v_left);
+        buf[(bx, by)].set_symbol("│");
         buf[(bx, by)].set_style(border);
-        buf[(bx + bw - 1, by)].set_symbol(v_right);
+        buf[(bx + bw - 1, by)].set_symbol("│");
         buf[(bx + bw - 1, by)].set_style(border);
+    }
+}
+
+/// Highlighted tab box: a half-block band in the rail's color whose inner
+/// edge sits mid-cell where the thin line would, so it thickens outward.
+/// The rail column at bx - 1 becomes the left side, junction glyphs merging
+/// band and rail so the box sprouts from it (Josh 2026-08-27).
+fn draw_tab_box_sprout(
+    buf: &mut ratatui::buffer::Buffer,
+    bx: u16,
+    bw: u16,
+    top: u16,
+    bottom: u16,
+    rail: Style,
+) {
+    let right = bx + bw - 1;
+    for x in bx..right {
+        buf[(x, top)].set_symbol("▀");
+        buf[(x, top)].set_style(rail);
+        buf[(x, bottom)].set_symbol("▄");
+        buf[(x, bottom)].set_style(rail);
+    }
+    buf[(bx - 1, top)].set_symbol("▛");
+    buf[(bx - 1, top)].set_style(rail);
+    buf[(right, top)].set_symbol("▜");
+    buf[(right, top)].set_style(rail);
+    buf[(bx - 1, bottom)].set_symbol("▙");
+    buf[(bx - 1, bottom)].set_style(rail);
+    buf[(right, bottom)].set_symbol("▟");
+    buf[(right, bottom)].set_style(rail);
+    for by in top + 1..bottom {
+        buf[(right, by)].set_symbol("▐");
+        buf[(right, by)].set_style(rail);
     }
 }
 
@@ -1166,28 +1186,17 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             break;
         }
         let buf = frame.buffer_mut();
-        let box_bg = if selected {
-            Some(p.surface0)
-        } else if tab_is_active {
-            Some(p.surface_dim)
-        } else {
-            None
-        };
         let top = rect.y;
         let bottom = rect.y + rect.height - 1;
-        if let Some(bg) = box_bg {
-            for by in top + 1..bottom {
-                for x in bx + 1..bx + bw - 1 {
-                    buf[(x, by)].set_style(Style::default().bg(bg));
-                }
-            }
-        }
-        let border = Style::default().fg(p.overlay0);
-        draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
         let rail = Style::default().fg(space_rail_color(ws, p));
         for by in rect.y..rect.y + rect.height {
             buf[(rect.x, by)].set_symbol("▌");
             buf[(rect.x, by)].set_style(rail);
+        }
+        if selected || tab_is_active {
+            draw_tab_box_sprout(buf, bx, bw, top, bottom, rail);
+        } else {
+            draw_tab_box_border(buf, bx, bw, top, bottom, Style::default().fg(p.overlay0));
         }
         let subs_live = tab
             .metadata_tokens
@@ -1630,29 +1639,17 @@ fn render_workspace_list(
                 break;
             }
             let tab_is_active = is_active && dash.tab_idx == ws.active_tab;
-            let box_bg = if selected {
-                Some(p.surface0)
-            } else if is_dragged || is_drop_target {
-                Some(p.surface1)
-            } else if tab_is_active {
-                Some(p.surface_dim)
-            } else {
-                None
-            };
+            let highlighted = selected || is_dragged || is_drop_target || tab_is_active;
             let top = y;
             let bottom = y + box_h - 1;
-            if let Some(bg) = box_bg {
-                for by in top + 1..bottom {
-                    for x in bx + 1..bx + bw - 1 {
-                        buf[(x, by)].set_style(Style::default().bg(bg));
-                    }
-                }
-            }
-            let border = Style::default().fg(p.overlay0);
-            draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
             for by in y..y + box_h {
                 buf[(card.rect.x, by)].set_symbol("▌");
                 buf[(card.rect.x, by)].set_style(rail);
+            }
+            if highlighted {
+                draw_tab_box_sprout(buf, bx, bw, top, bottom, rail);
+            } else {
+                draw_tab_box_border(buf, bx, bw, top, bottom, Style::default().fg(p.overlay0));
             }
 
             let phase_style = phase_tint(dash.state, dash.seen, p);
@@ -1858,18 +1855,26 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        // spaces carry no titles; the active tab's outline is the thick
-        // band, idle tabs keep the thin line box (Josh 2026-08-27)
-        assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), "▗");
+        // spaces carry no titles; the active tab's box sprouts from the rail
+        // in the rail's color, idle tabs keep the thin line box
+        assert_eq!(buffer[(0, first_row)].symbol(), "▛");
+        assert_eq!(buffer[(1, first_row)].symbol(), "▀");
+        assert_eq!(buffer[(0, first_row)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(1, first_row)].style().fg, Some(app.palette.text));
+        let corner_x = find_symbol_x(buffer, first_row, 26, "▜");
+        assert_eq!(buffer[(corner_x, first_row + 1)].symbol(), "▐");
+        let bottom_row = (first_row + 1..second_row)
+            .find(|row| buffer[(0, *row)].symbol() == "▙")
+            .expect("bottom junction below the active box");
+        assert_eq!(buffer[(1, bottom_row)].symbol(), "▄");
+        assert_eq!(buffer[(corner_x, bottom_row)].symbol(), "▟");
+        assert_eq!(buffer[(0, second_row)].symbol(), "▌");
         assert_eq!(buffer[(1, second_row)].symbol(), "┌");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
         assert_eq!(tab.fg, Some(app.palette.text));
-        assert_eq!(tab.bg, Some(app.palette.surface_dim));
-        let active_border = buffer[(1, first_row)].style();
-        assert_ne!(active_border.bg, Some(app.palette.surface_dim));
+        assert_eq!(tab.bg, Some(ratatui::style::Color::Reset));
 
         let idle_tab_row = second_row + 1;
         let idle = buffer[(find_symbol_x(buffer, idle_tab_row, 25, "s"), idle_tab_row)].style();
@@ -2175,18 +2180,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
-        assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        // the selected tab's outline is the thick band; the fill meets it
-        assert_eq!(buffer[(1, 5)].symbol(), "▗");
-        assert_eq!(buffer[(5, 5)].symbol(), "▖");
-        assert_eq!(buffer[(5, 7)].symbol(), "▘");
-        assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
-        assert_eq!(buffer[(2, 6)].style().bg, Some(app.palette.surface0));
+        // the selected tab's box sprouts from the rail in the rail's color;
+        // the unselected one keeps the thin line box
+        assert_eq!(buffer[(0, 5)].symbol(), "▛");
+        assert_eq!(buffer[(1, 5)].symbol(), "▀");
+        assert_eq!(buffer[(5, 5)].symbol(), "▜");
+        assert_eq!(buffer[(0, 6)].symbol(), "▌");
+        assert_eq!(buffer[(5, 6)].symbol(), "▐");
+        assert_eq!(buffer[(0, 7)].symbol(), "▙");
+        assert_eq!(buffer[(1, 7)].symbol(), "▄");
+        assert_eq!(buffer[(5, 7)].symbol(), "▟");
+        assert_eq!(buffer[(0, 5)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(1, 5)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(2, 6)].style().bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(buffer[(1, 9)].symbol(), "┌");
         assert_eq!(buffer[(3, 6)].symbol(), "⬤");
     }
 
     #[test]
-    fn collapsed_sidebar_active_tab_box_gets_backdrop() {
+    fn collapsed_sidebar_active_tab_box_sprouts_from_rail() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.ensure_test_terminals();
@@ -2206,10 +2218,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("collapsed sidebar should render");
 
         let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(active_box.x, active_box.y)].symbol(), "▛");
+        assert_eq!(buffer[(active_box.x + 1, active_box.y)].symbol(), "▀");
         let active = buffer[(active_box.x + 2, active_box.y + 1)].style();
-        assert_eq!(active.bg, Some(app.palette.surface_dim));
-        let idle = buffer[(idle_box.x + 2, idle_box.y + 1)].style();
-        assert_ne!(idle.bg, Some(app.palette.surface_dim));
+        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(buffer[(idle_box.x + 1, idle_box.y)].symbol(), "┌");
     }
 
     #[cfg(unix)]

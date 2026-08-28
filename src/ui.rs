@@ -1030,9 +1030,9 @@ mod tests {
 
         let boxes = collapsed_tab_boxes(&app, app.view.sidebar_rect);
         let active_box = boxes.iter().find(|b| b.ws_idx == 1).unwrap().rect;
-        let active_style = buffer[(active_box.x + 2, active_box.y + 1)].style();
 
-        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(buffer[(active_box.x, active_box.y)].symbol(), "▛");
+        assert_eq!(buffer[(active_box.x + 1, active_box.y)].symbol(), "▀");
     }
 
     #[test]
@@ -1065,8 +1065,8 @@ mod tests {
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
         // spaces no longer render titles; the tab box carries the content,
-        // and the selected tab's outline is the thick band
-        assert!(line1.starts_with("▌▗"), "box top: {line1:?}");
+        // and the selected tab's box sprouts from the rail
+        assert!(line1.starts_with("▛▀"), "box top: {line1:?}");
         assert!(!line2.contains("1 one"));
         assert!(line2.contains("shell"), "tab row: {line2:?}");
 
