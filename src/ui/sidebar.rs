@@ -402,6 +402,47 @@ fn phase_tint(state: AgentState, seen: bool, p: &Palette) -> Style {
     Style::default().fg(color)
 }
 
+/// True when wrapping carried `text` through to its final byte, so nothing
+/// was tail-elided away.
+fn wrap_keeps_tail(text: &str, lines: &[WrappedLine]) -> bool {
+    lines
+        .last()
+        .is_some_and(|last| text.get(last.start..) == Some(last.text.as_str()))
+}
+
+/// Wrap "title, phase" into the tab box rows. The phase clause is the part
+/// the reader scans first, so when the rows cannot hold everything the title
+/// is elided mid-sentence rather than letting tail truncation eat the phase.
+fn layout_tab_title(
+    title: &str,
+    phase: &str,
+    first: usize,
+    rest: usize,
+) -> (Option<usize>, Vec<WrappedLine>) {
+    if phase.is_empty() {
+        return (None, wrap_prose(title, first, rest, TAB_TITLE_MAX_LINES));
+    }
+    let full = format!("{title}, {phase}");
+    let lines = wrap_prose(&full, first, rest, TAB_TITLE_MAX_LINES);
+    if wrap_keeps_tail(&full, &lines) {
+        return (Some(full.len() - phase.len()), lines);
+    }
+    let cuts: Vec<usize> = title
+        .char_indices()
+        .filter_map(|(i, ch)| (ch == ' ').then_some(i))
+        .collect();
+    for cut in cuts.into_iter().rev() {
+        let candidate = format!("{}…, {phase}", title[..cut].trim_end());
+        let lines = wrap_prose(&candidate, first, rest, TAB_TITLE_MAX_LINES);
+        if wrap_keeps_tail(&candidate, &lines) {
+            return (Some(candidate.len() - phase.len()), lines);
+        }
+    }
+    let bare = format!("…, {phase}");
+    let lines = wrap_prose(&bare, first, rest, TAB_TITLE_MAX_LINES);
+    (Some(bare.len() - phase.len()), lines)
+}
+
 fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> {
     let ts = tint_start?;
     let at = ts.saturating_sub(line.start).min(line.text.len());
@@ -501,15 +542,9 @@ pub(crate) fn tab_dashboards(
                 })
                 .unwrap_or_else(|| "shell".to_string());
             let phase = toks.get("ph").map(String::as_str).unwrap_or("").trim().to_string();
-            let full = if phase.is_empty() {
-                title
-            } else {
-                format!("{title}, {phase}")
-            };
-            let tint_start = (!phase.is_empty()).then(|| full.len() - phase.len());
             let inner = (width.saturating_sub(TAB_BOX_CHROME) as usize).max(8);
             let first = inner.saturating_sub(TITLE_STATUS_RESERVE as usize).max(8);
-            let lines = wrap_prose(&full, first, inner, TAB_TITLE_MAX_LINES);
+            let (tint_start, lines) = layout_tab_title(&title, &phase, first, inner);
             let mut rows = Vec::with_capacity(lines.len() + 1);
             for (i, line) in lines.iter().enumerate() {
                 let tint_at = line_tint_at(line, tint_start);
@@ -2842,6 +2877,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ws_idx: 0,
                 indented: false,
             }]
+        );
+    }
+
+    #[test]
+    fn overflowing_tab_summary_keeps_the_phase_clause() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let body = "reportcard: pushing the /try report card redesign through \
+                    review and onto main with screenshots and stacked tiers";
+        ws.tabs[0].metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("t".into(), Some(body.to_string())),
+                ("ph".into(), Some("overhauling per review input".to_string())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        for width in 40..=90u16 {
+            let dashes = tab_dashboards(&app, &app.workspaces[0], width);
+            let joined = dashes[0]
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TabDashRow::Title { text, .. } | TabDashRow::TitleCont { text, .. } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                joined.contains("overhauling per review input"),
+                "phase lost at width {width}: {joined:?}"
+            );
+        }
+
+        let area = Rect::new(0, 0, 40, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..20)
+            .map(|row| row_text(buffer, row, 40))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect::<String>();
+        let words = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains("overhauling per review input"),
+            "phase missing from render: {words:?}"
         );
     }
 
