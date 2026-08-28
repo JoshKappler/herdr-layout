@@ -1,7 +1,8 @@
-//! Synthesizes notification audio as 16-bit mono WAV bytes: a short siren
-//! for requests, a soft ding for completions, and an optional morse-style
-//! position suffix (long beeps count the sidebar space top-down, short
-//! beeps count the tab inside that space).
+//! Synthesizes notification audio as 16-bit mono WAV bytes. The morse-style
+//! position (long beeps count the sidebar space top-down, short beeps count
+//! the tab inside that space) is the completion sound on its own; a short
+//! siren leads it for requests, and a soft ding stands in for completions
+//! whose pane has no visible sidebar row.
 
 use super::{SidebarPosition, Sound};
 
@@ -25,8 +26,12 @@ const SIREN_SWEEP_MS: u32 = 220;
 const SIREN_SWEEPS: u32 = 2;
 
 /// The built-in notification sound, with the morse position suffix when the
-/// triggering pane's sidebar location is known.
+/// triggering pane's sidebar location is known. A completion with a known
+/// position plays the morse alone.
 pub fn render_notification_wav(sound: Sound, position: Option<SidebarPosition>) -> Vec<u8> {
+    if let (Sound::Done, Some(position)) = (sound, position) {
+        return render_morse_wav(position);
+    }
     let mut samples = Vec::new();
     match sound {
         Sound::Done => push_ding(&mut samples),
@@ -39,8 +44,9 @@ pub fn render_notification_wav(sound: Sound, position: Option<SidebarPosition>) 
     wav_from_samples(&samples)
 }
 
-/// The morse position suffix alone, played after a user-configured sound
-/// file that the audio player renders separately.
+/// The morse position alone: the whole completion sound, and the suffix
+/// played after a user-configured sound file that the audio player renders
+/// separately.
 pub fn render_morse_wav(position: SidebarPosition) -> Vec<u8> {
     let mut samples = Vec::new();
     push_silence(&mut samples, STANDALONE_MORSE_LEAD_IN_MS);
@@ -193,8 +199,8 @@ mod tests {
     #[test]
     fn morse_suffix_counts_spaces_as_dahs_and_tabs_as_dits() {
         let position = SidebarPosition { space: 3, tab: 2 };
-        let wav = render_notification_wav(Sound::Done, Some(position));
-        let expected = ms_samples(DING_MS)
+        let wav = render_notification_wav(Sound::Request, Some(position));
+        let expected = ms_samples(SIREN_SWEEP_MS * SIREN_SWEEPS)
             + ms_samples(BASE_TO_MORSE_GAP_MS)
             + 3 * ms_samples(DAH_MS) // three dahs for the third space down
             + 2 * ms_samples(ELEMENT_GAP_MS)
@@ -202,6 +208,15 @@ mod tests {
             + 2 * ms_samples(DIT_MS) // two dits for the second tab
             + ms_samples(ELEMENT_GAP_MS);
         assert_eq!(wav_sample_count(&wav), expected);
+    }
+
+    #[test]
+    fn done_with_position_is_the_morse_alone() {
+        let position = SidebarPosition { space: 3, tab: 2 };
+        assert_eq!(
+            render_notification_wav(Sound::Done, Some(position)),
+            render_morse_wav(position)
+        );
     }
 
     #[test]

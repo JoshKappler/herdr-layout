@@ -59,8 +59,9 @@ impl SidebarPosition {
     }
 }
 
-/// Play a notification sound in a background thread, followed by the morse
-/// position suffix when the triggering pane's sidebar location is known.
+/// Play a notification sound in a background thread. A known sidebar
+/// location renders as morse position beeps: alone for a completion, after
+/// the siren for a request, after the file for a custom-configured sound.
 /// Silently does nothing if no audio player is available.
 pub fn play(sound: Sound, config: &crate::config::SoundConfig, position: Option<SidebarPosition>) {
     if sound_playback_disabled_by_env() {
