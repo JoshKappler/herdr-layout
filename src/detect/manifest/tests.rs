@@ -880,6 +880,92 @@ fn claude_background_monitor_bar_is_a_background_wait() {
 }
 
 #[test]
+fn claude_mixed_background_count_list_is_a_background_wait() {
+    // captured live on 2026-08-28: 2.1.x renders mixed background kinds as a
+    // comma list, which the single-count pattern missed and the pane went green
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 2 shells, 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_three_kind_background_count_list_is_a_background_wait() {
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell, 2 monitors, 1 task · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_background_task_bar_is_a_background_wait() {
+    // single-kind regression for the comma-list change; shells and monitors
+    // are pinned by the two tests above this block
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 3 tasks · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_zero_count_in_background_list_stays_idle() {
+    // near-miss: a zero count is not a live background process
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 0 shells, 2 monitors · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_background_count_list_without_status_lead_stays_idle() {
+    // near-miss: the count list only counts when the ⏸⏵ status row leads the line
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        bypass permissions on · 2 shells, 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
 fn claude_live_turn_is_not_a_background_wait() {
     let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
         ────────────\n\
