@@ -53,7 +53,11 @@ pub struct SubLane {
     #[serde(default)]
     pub label: String,
     #[serde(default)]
+    pub status: String,
+    #[serde(default)]
     pub started: f64,
+    #[serde(default)]
+    pub ended: f64,
     #[serde(default)]
     pub path: String,
     #[serde(default)]

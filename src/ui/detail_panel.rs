@@ -136,8 +136,18 @@ fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
         lines.push(section_header("subagents", width, p));
         hits.push(None);
         for sub in &tl.subs {
-            let running = (sub.started > 0.0).then(|| fmt_secs(now - sub.started));
-            lines.push(item_line("●", &sub.label, running, p.yellow, width, p));
+            // finished lanes stay listed: teal like a done tab, total runtime
+            let (color, clock) = if sub.status == "done" {
+                let total = (sub.started > 0.0 && sub.ended > sub.started)
+                    .then(|| fmt_secs(sub.ended - sub.started));
+                (p.teal, total)
+            } else {
+                (
+                    p.yellow,
+                    (sub.started > 0.0).then(|| fmt_secs(now - sub.started)),
+                )
+            };
+            lines.push(item_line("●", &sub.label, clock, color, width, p));
             hits.push(Some(DetailPanelHit::ToggleSub {
                 path: sub.path.clone(),
             }));
@@ -261,12 +271,24 @@ mod tests {
             ],
             current: vec![item("u3", "building the panel", None)],
             next: vec!["ship the teardown".into()],
-            subs: vec![crate::app::detail_panel::SubLane {
-                label: "writing allocation unit tests".into(),
-                started: 50.0,
-                path: "/tmp/lane.jsonl".into(),
-                events: vec!["18:59 Write sandboxProbe.ts".into()],
-            }],
+            subs: vec![
+                crate::app::detail_panel::SubLane {
+                    label: "writing allocation unit tests".into(),
+                    status: "working".into(),
+                    started: 50.0,
+                    ended: 0.0,
+                    path: "/tmp/lane.jsonl".into(),
+                    events: vec!["18:59 Write sandboxProbe.ts".into()],
+                },
+                crate::app::detail_panel::SubLane {
+                    label: "audited the palette mapping".into(),
+                    status: "done".into(),
+                    started: 10.0,
+                    ended: 52.0,
+                    path: "/tmp/lane-done.jsonl".into(),
+                    events: vec![],
+                },
+            ],
         }
     }
 
@@ -292,11 +314,17 @@ mod tests {
         );
         // purple prediction row is not clickable
         assert_eq!(detail_panel_hit(&app, rect, content.y + 4), None);
-        // blank + header, then the subagent row toggles its expansion
+        // blank + header, then live and finished subagent rows both toggle
         assert_eq!(
             detail_panel_hit(&app, rect, content.y + 7),
             Some(DetailPanelHit::ToggleSub {
                 path: "/tmp/lane.jsonl".into()
+            })
+        );
+        assert_eq!(
+            detail_panel_hit(&app, rect, content.y + 8),
+            Some(DetailPanelHit::ToggleSub {
+                path: "/tmp/lane-done.jsonl".into()
             })
         );
     }
@@ -349,6 +377,23 @@ mod tests {
         assert_eq!(
             buffer[(content.x, content.y + 4)].style().fg,
             Some(app.palette.mauve)
+        );
+        // subagent board: live lane yellow, finished lane teal with runtime
+        assert_eq!(
+            buffer[(content.x, content.y + 7)].style().fg,
+            Some(app.palette.yellow)
+        );
+        assert_eq!(
+            buffer[(content.x, content.y + 8)].style().fg,
+            Some(app.palette.teal)
+        );
+        assert_eq!(
+            buffer[(content.x + content.width - 3, content.y + 8)].symbol(),
+            "4"
+        );
+        assert_eq!(
+            buffer[(content.x + content.width - 1, content.y + 8)].symbol(),
+            "s"
         );
     }
 
