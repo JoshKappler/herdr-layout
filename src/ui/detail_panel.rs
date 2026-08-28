@@ -7,13 +7,15 @@ use ratatui::{
 };
 
 use super::text::{display_width, truncate_end};
-use crate::app::detail_panel::Timeline;
+use crate::app::detail_panel::{ExchangeView, Timeline};
 use crate::app::state::Palette;
 use crate::app::AppState;
 
 /// Right-side drill-in for the focused tab (Josh 2026-08-27): one aggregate
 /// line, then the task timeline: done in green with per-task time, in
 /// flight in yellow with a running clock, inferred next steps in purple.
+/// The bottom third holds the prompt viewer cycling recent exchanges;
+/// clicking a task row pins it to that exchange.
 pub(super) fn render_detail_panel(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width < 4 || area.height < 2 {
         return;
@@ -27,10 +29,14 @@ pub(super) fn render_detail_panel(app: &AppState, frame: &mut Frame, area: Rect)
         buf[(area.x, y)].set_style(sep_style);
     }
 
-    let content = content_rect(area);
-    let lines = detail_panel_lines(app, content.width);
-    let scroll = app.detail_panel_scroll.min(max_scroll_for(&lines, content)) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content);
+    let (list, viewer) = split_content(content_rect(area));
+    let lines = detail_panel_lines(app, list.width);
+    let scroll = app.detail_panel_scroll.min(max_scroll_for(&lines, list)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), list);
+    if viewer.height > 0 {
+        let lines = viewer_lines(app, viewer.width, viewer.height);
+        frame.render_widget(Paragraph::new(lines), viewer);
+    }
 }
 
 fn content_rect(area: Rect) -> Rect {
@@ -42,12 +48,28 @@ fn content_rect(area: Rect) -> Rect {
     )
 }
 
+const VIEWER_MIN_CONTENT_ROWS: u16 = 9;
+
+/// The list keeps the top two thirds; the prompt viewer takes the bottom
+/// third once the content area is tall enough for both.
+fn split_content(content: Rect) -> (Rect, Rect) {
+    if content.height < VIEWER_MIN_CONTENT_ROWS {
+        return (content, Rect::default());
+    }
+    let viewer_h = content.height / 3;
+    let list_h = content.height - viewer_h;
+    (
+        Rect::new(content.x, content.y, content.width, list_h),
+        Rect::new(content.x, content.y + list_h, content.width, viewer_h),
+    )
+}
+
 pub(crate) fn detail_panel_max_scroll(app: &AppState, area: Rect) -> usize {
     if area.width < 4 || area.height < 2 {
         return 0;
     }
-    let content = content_rect(area);
-    max_scroll_for(&detail_panel_lines(app, content.width), content)
+    let (list, _) = split_content(content_rect(area));
+    max_scroll_for(&detail_panel_lines(app, list.width), list)
 }
 
 fn max_scroll_for(lines: &[Line<'_>], content: Rect) -> usize {
@@ -57,18 +79,24 @@ fn max_scroll_for(lines: &[Line<'_>], content: Rect) -> usize {
 /// What a click on a panel line should do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DetailPanelHit {
-    JumpFeed { query: String },
+    /// pin the viewer to exchange `u`; `query` also jumps the feed
+    ViewExchange { u: String, query: Option<String> },
     ToggleSub { path: String },
+    /// a click anywhere in the viewer unpins it and resumes cycling
+    ViewerResume,
 }
 
 pub(crate) fn detail_panel_hit(app: &AppState, area: Rect, row: u16) -> Option<DetailPanelHit> {
-    let content = content_rect(area);
-    if row < content.y || row >= content.y + content.height {
+    let (list, viewer) = split_content(content_rect(area));
+    if viewer.height > 0 && row >= viewer.y && row < viewer.y + viewer.height {
+        return Some(DetailPanelHit::ViewerResume);
+    }
+    if row < list.y || row >= list.y + list.height {
         return None;
     }
-    let (lines, hits) = detail_panel_lines_with_hits(app, content.width);
-    let scroll = app.detail_panel_scroll.min(max_scroll_for(&lines, content));
-    let line_idx = (row - content.y) as usize + scroll;
+    let (lines, hits) = detail_panel_lines_with_hits(app, list.width);
+    let scroll = app.detail_panel_scroll.min(max_scroll_for(&lines, list));
+    let line_idx = (row - list.y) as usize + scroll;
     hits.into_iter().nth(line_idx).flatten()
 }
 
@@ -124,12 +152,18 @@ fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
             width,
             p,
         ));
-        hits.push(feed_query(&item.head).map(|query| DetailPanelHit::JumpFeed { query }));
+        hits.push(Some(DetailPanelHit::ViewExchange {
+            u: item.u.clone(),
+            query: feed_query(&item.head),
+        }));
     }
     for item in &tl.current {
         let running = (item.ts > 0.0).then(|| fmt_secs(now - item.ts));
         lines.push(item_line("●", &item.label, running, p.yellow, width, p));
-        hits.push(feed_query(&item.head).map(|query| DetailPanelHit::JumpFeed { query }));
+        hits.push(Some(DetailPanelHit::ViewExchange {
+            u: item.u.clone(),
+            query: feed_query(&item.head),
+        }));
     }
     for label in &tl.next {
         lines.push(item_line("◇", label, None, p.mauve, width, p));
@@ -166,6 +200,64 @@ fn detail_panel_lines_with_hits(app: &AppState, width: u16) -> PanelLines {
         }
     }
     (lines, hits)
+}
+
+const CYCLE_WINDOW: usize = 8;
+
+/// The exchange the viewer shows: the pinned one when it resolves, else
+/// the cycler's pick over the last CYCLE_WINDOW, oldest to newest.
+/// Returns (position, total, view) with position over all exchanges.
+fn viewer_exchange(app: &AppState) -> Option<(usize, usize, ExchangeView)> {
+    let tl = app.detail_panel.as_ref()?.timeline.as_ref()?;
+    let mut views = tl.exchange_views();
+    if views.is_empty() {
+        return None;
+    }
+    let total = views.len();
+    let idx = app
+        .detail_panel_pinned
+        .as_deref()
+        .and_then(|u| views.iter().position(|v| v.u == u))
+        .unwrap_or_else(|| {
+            let window = total.min(CYCLE_WINDOW);
+            total - window + app.detail_panel_cycle % window
+        });
+    Some((idx + 1, total, views.swap_remove(idx)))
+}
+
+fn viewer_lines(app: &AppState, width: u16, height: u16) -> Vec<Line<'static>> {
+    let p = &app.palette;
+    let dim = Style::default().fg(p.subtext0);
+    let mut lines = vec![section_header("prompts", width, p)];
+    let Some((pos, total, exch)) = viewer_exchange(app) else {
+        lines.push(Line::from(Span::styled("no prompts yet", dim)));
+        return lines;
+    };
+    let mut meta = vec![fmt_clock(exch.ts), format!("{pos}/{total}")];
+    if let Some(secs) = exch.secs {
+        meta.insert(1, fmt_secs(secs));
+    }
+    if app.detail_panel_pinned.as_deref() == Some(exch.u.as_str()) {
+        meta.push("pinned".into());
+    }
+    lines.push(Line::from(Span::styled(meta.join(" · "), dim)));
+    let (glyph, color) = if exch.done {
+        ("✓", p.green)
+    } else {
+        ("●", p.yellow)
+    };
+    lines.push(item_line(glyph, &exch.label, None, color, width, p));
+    let body = Style::default().fg(p.text);
+    let wrap_w = width.max(8) as usize;
+    let room = (height as usize).saturating_sub(lines.len());
+    for text in wrap_text(&exch.head, wrap_w).into_iter().take(room) {
+        lines.push(Line::from(Span::styled(text, body)));
+    }
+    let room = (height as usize).saturating_sub(lines.len());
+    for text in wrap_text(&exch.rhead, wrap_w).into_iter().take(room) {
+        lines.push(Line::from(Span::styled(text, dim)));
+    }
+    lines
 }
 
 fn aggregate_line(tl: &Timeline) -> String {
@@ -244,10 +336,61 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// Epoch seconds as the local wall clock, "14:22".
+fn fmt_clock(ts: f64) -> String {
+    let (hour, min) = local_hour_min(ts.max(0.0) as i64);
+    format!("{hour:02}:{min:02}")
+}
+
+#[cfg(unix)]
+fn local_hour_min(epoch: i64) -> (i32, i32) {
+    let time = epoch as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&time, &mut tm) };
+    (tm.tm_hour, tm.tm_min)
+}
+
+#[cfg(not(unix))]
+fn local_hour_min(epoch: i64) -> (i32, i32) {
+    let day = epoch.rem_euclid(86_400) as i32;
+    (day / 3600, day % 3600 / 60)
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        if para.trim().is_empty() {
+            if !matches!(out.last(), Some(last) if last.is_empty()) && !out.is_empty() {
+                out.push(String::new());
+            }
+            continue;
+        }
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if line.is_empty() {
+                line = word.to_string();
+            } else if display_width(&line) + 1 + display_width(word) <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(std::mem::take(&mut line));
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    while matches!(out.last(), Some(last) if last.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::detail_panel::TimelineItem;
+    use crate::app::detail_panel::{Exchange, TimelineItem};
 
     #[test]
     fn durations_and_tokens_format_compactly() {
@@ -277,6 +420,15 @@ mod tests {
             ],
             current: vec![item("u3", "building the panel", None)],
             next: vec!["ship the teardown".into()],
+            exch: vec![Exchange {
+                u: "u1".into(),
+                ts: 1_787_937_325.0,
+                last_ts: 1_787_937_625.0,
+                head: "please restore both configs before anything else breaks".into(),
+                rhead: "Restored. Both configs match again.".into(),
+                label: String::new(),
+                ylabel: "restoring the configs".into(),
+            }],
             subs: vec![
                 crate::app::detail_panel::SubLane {
                     label: "writing allocation unit tests".into(),
@@ -312,12 +464,13 @@ mod tests {
 
         let content = content_rect(rect);
         assert_eq!(detail_panel_hit(&app, rect, content.y), None);
-        // blank + tasks header, then the first done row jumps the feed
+        // blank + tasks header, then the first done row pins its exchange
         assert_eq!(detail_panel_hit(&app, rect, content.y + 2), None);
         assert_eq!(
             detail_panel_hit(&app, rect, content.y + 3),
-            Some(DetailPanelHit::JumpFeed {
-                query: "please restored the configs".into()
+            Some(DetailPanelHit::ViewExchange {
+                u: "u1".into(),
+                query: Some("please restored the configs".into()),
             })
         );
         // purple prediction row is not clickable
@@ -335,6 +488,95 @@ mod tests {
                 path: "/tmp/lane-done.jsonl".into()
             })
         );
+        // every viewer row resumes cycling, never a list hit
+        let (list, viewer) = split_content(content);
+        assert_eq!(list.height, 26);
+        assert_eq!(viewer.height, 13);
+        assert_eq!(detail_panel_hit(&app, rect, viewer.y - 1), None);
+        for row in viewer.y..viewer.y + viewer.height {
+            assert_eq!(
+                detail_panel_hit(&app, rect, row),
+                Some(DetailPanelHit::ViewerResume)
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_clicks_intercept_even_where_scrolled_rows_would_hit() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(test_timeline()),
+        );
+        // content is 9 rows: 6 list rows plus a 3-row viewer
+        let rect = Rect::new(0, 0, 46, 10);
+        let (list, viewer) = split_content(content_rect(rect));
+        app.detail_panel_scroll = 4;
+        // scrolled so a subagent toggle row sits on the last list row
+        assert_eq!(
+            detail_panel_hit(&app, rect, list.y + list.height - 1),
+            Some(DetailPanelHit::ToggleSub {
+                path: "/tmp/lane.jsonl".into()
+            })
+        );
+        // one row lower is the viewer: the next toggle row must not map
+        assert_eq!(
+            detail_panel_hit(&app, rect, viewer.y),
+            Some(DetailPanelHit::ViewerResume)
+        );
+    }
+
+    #[test]
+    fn short_panels_skip_the_viewer_and_keep_the_full_list() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(test_timeline()),
+        );
+        // content is 8 rows, under the 9-row minimum: no viewer anywhere
+        let rect = Rect::new(0, 0, 46, 9);
+        let content = content_rect(rect);
+        assert_eq!(split_content(content).1, Rect::default());
+        assert_eq!(
+            detail_panel_hit(&app, rect, content.y + 3),
+            Some(DetailPanelHit::ViewExchange {
+                u: "u1".into(),
+                query: Some("please restored the configs".into()),
+            })
+        );
+        for row in content.y + 6..content.y + content.height {
+            assert_ne!(
+                detail_panel_hit(&app, rect, row),
+                Some(DetailPanelHit::ViewerResume)
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_cycles_oldest_to_newest_and_pins_on_request() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(test_timeline()),
+        );
+        for (cycle, u) in [(0, "u1"), (1, "u2"), (2, "u3"), (3, "u1")] {
+            app.detail_panel_cycle = cycle;
+            let (pos, total, view) = viewer_exchange(&app).expect("an exchange to show");
+            assert_eq!(view.u, u);
+            assert_eq!(total, 3);
+            assert_eq!(pos, cycle % 3 + 1);
+        }
+        // u1 rides its _exch entry; u2 has none and falls back to the item
+        app.detail_panel_cycle = 0;
+        let (_, _, view) = viewer_exchange(&app).expect("an exchange to show");
+        assert!(view.head.starts_with("please restore both configs"));
+        assert!(!view.rhead.is_empty());
+        app.detail_panel_cycle = 1;
+        let (_, _, view) = viewer_exchange(&app).expect("an exchange to show");
+        assert_eq!(view.head, "please  soon");
+        assert!(view.rhead.is_empty());
+
+        app.detail_panel_pinned = Some("u1".into());
+        app.detail_panel_cycle = 2;
+        let (pos, _, view) = viewer_exchange(&app).expect("an exchange to show");
+        assert_eq!((pos, view.u.as_str()), (1, "u1"));
     }
 
     #[test]
@@ -408,6 +650,34 @@ mod tests {
         assert_eq!(
             buffer[(content.x + content.width - 1, content.y + 10)].symbol(),
             "s"
+        );
+        // prompt viewer: header, meta with position, label, head, dim rhead
+        let (_, viewer) = split_content(content);
+        let row_text = |y: u16| -> String {
+            (viewer.x..viewer.x + viewer.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
+        assert!(row_text(viewer.y).starts_with("─ prompts ─"));
+        assert_eq!(
+            buffer[(viewer.x, viewer.y)].style().fg,
+            Some(app.palette.overlay0)
+        );
+        assert!(row_text(viewer.y + 1).contains("5m · 1/3"));
+        assert_eq!(buffer[(viewer.x, viewer.y + 2)].symbol(), "✓");
+        assert_eq!(
+            buffer[(viewer.x, viewer.y + 2)].style().fg,
+            Some(app.palette.green)
+        );
+        assert!(row_text(viewer.y + 3).starts_with("please restore both configs"));
+        assert_eq!(
+            buffer[(viewer.x, viewer.y + 3)].style().fg,
+            Some(app.palette.text)
+        );
+        assert!(row_text(viewer.y + 5).starts_with("Restored."));
+        assert_eq!(
+            buffer[(viewer.x, viewer.y + 5)].style().fg,
+            Some(app.palette.subtext0)
         );
     }
 

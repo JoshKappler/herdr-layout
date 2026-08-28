@@ -253,6 +253,7 @@ fn compute_view_internal(
 
     if detail_w > 0 {
         app.refresh_detail_panel();
+        app.tick_detail_cycler(std::time::Instant::now());
         app.detail_panel_scroll = app
             .detail_panel_scroll
             .min(detail_panel::detail_panel_max_scroll(app, detail_area));

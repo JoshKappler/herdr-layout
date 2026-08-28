@@ -529,13 +529,19 @@ impl AppState {
                         self.view.detail_panel_rect,
                         mouse.row,
                     ) {
-                        Some(crate::ui::DetailPanelHit::JumpFeed { query }) => {
-                            self.jump_feed_to_text(terminal_runtimes, &query);
+                        Some(crate::ui::DetailPanelHit::ViewExchange { u, query }) => {
+                            self.detail_panel_pinned = Some(u);
+                            if let Some(query) = query {
+                                self.jump_feed_to_text(terminal_runtimes, &query);
+                            }
                         }
                         Some(crate::ui::DetailPanelHit::ToggleSub { path }) => {
                             if !self.detail_panel_expanded.remove(&path) {
                                 self.detail_panel_expanded.insert(path);
                             }
+                        }
+                        Some(crate::ui::DetailPanelHit::ViewerResume) => {
+                            self.detail_panel_pinned = None;
                         }
                         None => {}
                     }
@@ -2786,6 +2792,52 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
 
         assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn detail_panel_clicks_pin_and_unpin_the_prompt_viewer() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.detail_panel_open = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 180, 40));
+        let rect = app.state.view.detail_panel_rect;
+        assert!(rect.width > 0);
+
+        let item = |u: &str| crate::app::detail_panel::TimelineItem {
+            u: u.into(),
+            label: "restored the configs".into(),
+            head: "please restore the configs".into(),
+            ts: 100.0,
+            secs: Some(5.0),
+            off: 0,
+        };
+        app.state.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(
+                crate::app::detail_panel::Timeline {
+                    done: vec![item("u1")],
+                    current: vec![item("u2")],
+                    ..Default::default()
+                },
+            ),
+        );
+
+        // aggregate, blank, tasks header, then the done row on content row 3
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 3,
+            rect.y + 4,
+        ));
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u1"));
+
+        // a click in the viewer, two thirds down the content, unpins
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 3,
+            rect.y + 30,
+        ));
+        assert_eq!(app.state.detail_panel_pinned, None);
     }
 
     #[test]

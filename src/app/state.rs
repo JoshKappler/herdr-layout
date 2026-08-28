@@ -1483,6 +1483,10 @@ pub struct AppState {
     pub detail_panel: Option<crate::app::detail_panel::DetailPanelCache>,
     /// subagent lane paths expanded in the detail panel's board
     pub detail_panel_expanded: std::collections::HashSet<String>,
+    /// exchange uuid the prompt viewer is pinned to; None cycles
+    pub detail_panel_pinned: Option<String>,
+    pub detail_panel_cycle: usize,
+    pub detail_panel_cycle_at: Option<std::time::Instant>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1861,6 +1865,9 @@ impl AppState {
             detail_panel_scroll: 0,
             detail_panel: None,
             detail_panel_expanded: std::collections::HashSet::new(),
+            detail_panel_pinned: None,
+            detail_panel_cycle: 0,
+            detail_panel_cycle_at: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
