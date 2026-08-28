@@ -6,7 +6,12 @@ use ratatui::{
 };
 
 mod detail_panel;
-pub(crate) use self::detail_panel::{detail_panel_hit, detail_panel_max_scroll, DetailPanelHit};
+pub(crate) use self::detail_panel::{
+    detail_panel_hit, detail_panel_max_scroll, detail_panel_viewer_max_scroll,
+    detail_panel_viewer_rect, DetailPanelHit,
+};
+#[cfg(test)]
+pub(crate) use self::detail_panel::test_viewer_buttons;
 mod dialogs;
 mod keybind_help;
 mod menus;
@@ -257,6 +262,7 @@ fn compute_view_internal(
         app.detail_panel_scroll = app
             .detail_panel_scroll
             .min(detail_panel::detail_panel_max_scroll(app, detail_area));
+        detail_panel::sync_viewer_scroll(app);
     }
 
     let (tab_bar_rect, terminal_area) = app

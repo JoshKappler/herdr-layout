@@ -1487,6 +1487,9 @@ pub struct AppState {
     pub detail_panel_pinned: Option<String>,
     pub detail_panel_cycle: usize,
     pub detail_panel_cycle_at: Option<std::time::Instant>,
+    /// prompt viewer body scroll; resets when the shown exchange changes
+    pub detail_panel_viewer_scroll: usize,
+    pub detail_panel_viewer_shown: Option<String>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1868,6 +1871,8 @@ impl AppState {
             detail_panel_pinned: None,
             detail_panel_cycle: 0,
             detail_panel_cycle_at: None,
+            detail_panel_viewer_scroll: 0,
+            detail_panel_viewer_shown: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

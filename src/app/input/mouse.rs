@@ -536,6 +536,7 @@ impl AppState {
                     match crate::ui::detail_panel_hit(
                         self,
                         self.view.detail_panel_rect,
+                        mouse.column,
                         mouse.row,
                     ) {
                         Some(crate::ui::DetailPanelHit::ViewExchange { u, query }) => {
@@ -552,7 +553,19 @@ impl AppState {
                         Some(crate::ui::DetailPanelHit::ViewerResume) => {
                             self.detail_panel_pinned = None;
                         }
-                        None => {}
+                        // stepping from a clamped end is a no-op, never an unpin
+                        Some(
+                            crate::ui::DetailPanelHit::ViewerPrev { u }
+                            | crate::ui::DetailPanelHit::ViewerNext { u },
+                        ) => {
+                            if let Some(u) = u {
+                                self.detail_panel_pinned = Some(u);
+                            }
+                        }
+                        Some(crate::ui::DetailPanelHit::ViewerJump { query: Some(query) }) => {
+                            self.jump_feed_to_text(terminal_runtimes, &query);
+                        }
+                        _ => {}
                     }
                     return None;
                 }
@@ -1104,7 +1117,25 @@ impl AppState {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if self.over_detail_panel(mouse.column, mouse.row) =>
             {
-                if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+                let viewer = crate::ui::detail_panel_viewer_rect(self.view.detail_panel_rect);
+                let over_viewer = viewer.height > 0
+                    && mouse.row >= viewer.y
+                    && mouse.row < viewer.y + viewer.height;
+                if over_viewer {
+                    // the prompt viewer scrolls its own body, clamped
+                    if up {
+                        self.detail_panel_viewer_scroll =
+                            self.detail_panel_viewer_scroll.saturating_sub(2);
+                    } else {
+                        let max = crate::ui::detail_panel_viewer_max_scroll(
+                            self,
+                            self.view.detail_panel_rect,
+                        );
+                        self.detail_panel_viewer_scroll =
+                            self.detail_panel_viewer_scroll.saturating_add(2).min(max);
+                    }
+                } else if up {
                     self.detail_panel_scroll = self.detail_panel_scroll.saturating_sub(2);
                 } else {
                     let max = crate::ui::detail_panel_max_scroll(self, self.view.detail_panel_rect);
@@ -2909,6 +2940,117 @@ mod tests {
             rect.y + 30,
         ));
         assert_eq!(app.state.detail_panel_pinned, None);
+    }
+
+    fn detail_panel_app(timeline: crate::app::detail_panel::Timeline) -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        app.state.detail_panel_open = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 180, 40));
+        app.state.detail_panel = Some(
+            crate::app::detail_panel::DetailPanelCache::test_with_timeline(timeline),
+        );
+        app
+    }
+
+    fn viewer_button_pos(
+        state: &crate::app::state::AppState,
+        pick: fn(&crate::ui::DetailPanelHit) -> bool,
+    ) -> (u16, u16) {
+        crate::ui::test_viewer_buttons(state, state.view.detail_panel_rect)
+            .into_iter()
+            .find(|(_, _, hit)| pick(hit))
+            .map(|(col, row, _)| (col, row))
+            .expect("a viewer button on the meta row")
+    }
+
+    #[test]
+    fn detail_panel_viewer_buttons_step_and_clamp_without_unpinning() {
+        let item = |u: &str, secs| crate::app::detail_panel::TimelineItem {
+            u: u.into(),
+            label: "restored the configs".into(),
+            head: "please restore the configs".into(),
+            ts: 100.0,
+            secs,
+            off: 0,
+        };
+        let mut app = detail_panel_app(crate::app::detail_panel::Timeline {
+            done: vec![item("u1", Some(5.0)), item("u2", Some(5.0))],
+            current: vec![item("u3", None)],
+            ..Default::default()
+        });
+        app.state.detail_panel_cycle = 1; // the cycler is showing u2
+        let prev = |hit: &crate::ui::DetailPanelHit| {
+            matches!(hit, crate::ui::DetailPanelHit::ViewerPrev { .. })
+        };
+        let next = |hit: &crate::ui::DetailPanelHit| {
+            matches!(hit, crate::ui::DetailPanelHit::ViewerNext { .. })
+        };
+        let jump = |hit: &crate::ui::DetailPanelHit| {
+            matches!(hit, crate::ui::DetailPanelHit::ViewerJump { .. })
+        };
+        let click = |app: &mut crate::app::App, pick: fn(&crate::ui::DetailPanelHit) -> bool| {
+            let (col, row) = viewer_button_pos(&app.state, pick);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        };
+
+        // stepping while auto-cycling pins the shown exchange's neighbor
+        click(&mut app, next);
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u3"));
+        // the newest clamps: another next holds the pin, never unpins
+        click(&mut app, next);
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u3"));
+        click(&mut app, prev);
+        click(&mut app, prev);
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u1"));
+        // the oldest clamps too
+        click(&mut app, prev);
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u1"));
+        // jump neither steps nor unpins (no runtime here, so no feed move)
+        click(&mut app, jump);
+        assert_eq!(app.state.detail_panel_pinned.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn detail_panel_wheel_scrolls_viewer_and_list_independently() {
+        let long_head = (1..=12)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item = |i: usize| crate::app::detail_panel::TimelineItem {
+            u: format!("u{i}"),
+            label: "step".into(),
+            head: long_head.clone(),
+            ts: 100.0,
+            secs: Some(5.0),
+            off: 0,
+        };
+        let mut app = detail_panel_app(crate::app::detail_panel::Timeline {
+            done: (1..=30).map(item).collect(),
+            current: vec![item(31)],
+            ..Default::default()
+        });
+        let rect = app.state.view.detail_panel_rect;
+        let viewer = crate::ui::detail_panel_viewer_rect(rect);
+        assert!(viewer.height > 0);
+
+        // the list wheel path is untouched and leaves the viewer alone
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, rect.x + 3, rect.y + 2));
+        assert_eq!(app.state.detail_panel_scroll, 2);
+        assert_eq!(app.state.detail_panel_viewer_scroll, 0);
+        // the viewer wheel scrolls only its body, clamped at 12 - 10 rows
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, rect.x + 3, viewer.y + 1));
+        assert_eq!(app.state.detail_panel_viewer_scroll, 2);
+        assert_eq!(app.state.detail_panel_scroll, 2);
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, rect.x + 3, viewer.y + 1));
+        assert_eq!(app.state.detail_panel_viewer_scroll, 2);
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, rect.x + 3, viewer.y + 1));
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, rect.x + 3, viewer.y + 1));
+        assert_eq!(app.state.detail_panel_viewer_scroll, 0);
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, rect.x + 3, rect.y + 2));
+        assert_eq!(app.state.detail_panel_scroll, 0);
     }
 
     #[test]

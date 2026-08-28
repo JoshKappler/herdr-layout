@@ -570,6 +570,8 @@ impl App {
             detail_panel_pinned: None,
             detail_panel_cycle: 0,
             detail_panel_cycle_at: None,
+            detail_panel_viewer_scroll: 0,
+            detail_panel_viewer_shown: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
