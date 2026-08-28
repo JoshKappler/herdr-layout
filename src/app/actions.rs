@@ -3132,7 +3132,14 @@ impl AppState {
     fn apply_agent_notification_delivery(&mut self, delivery: &AgentNotificationDelivery) {
         if self.local_sound_playback {
             if let Some(sound) = delivery.sound {
-                crate::sound::play(sound, &self.sound);
+                let position = self
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.id == delivery.workspace_id)
+                    .and_then(|ws_idx| {
+                        crate::ui::sidebar_morse_position(self, ws_idx, delivery.pane_id)
+                    });
+                crate::sound::play(sound, &self.sound, position);
             }
         }
 

@@ -1779,10 +1779,11 @@ impl HeadlessServer {
                     update.agent_label.as_deref(),
                 )
             {
+                let body = self.sound_position_body(update.pane_id);
                 self.send_notify_to_foreground_client(
                     protocol::NotifyKind::Sound,
                     sound_notify_message(sound),
-                    None,
+                    body,
                 );
             }
         }
@@ -1828,10 +1829,11 @@ impl HeadlessServer {
         delivery: &crate::app::state::AgentNotificationDelivery,
     ) {
         if let Some(sound) = delivery.sound {
+            let body = self.sound_position_body(delivery.pane_id);
             self.send_notify_to_foreground_client(
                 protocol::NotifyKind::Sound,
                 sound_notify_message(sound),
-                None,
+                body,
             );
         }
 
@@ -1845,6 +1847,19 @@ impl HeadlessServer {
                 );
             }
         }
+    }
+
+    /// Encoded sidebar position ("space.tab") of the pane behind a sound
+    /// notification, carried in the notify body so the client can append the
+    /// morse position suffix. None when the pane has no visible sidebar row.
+    fn sound_position_body(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        let app = &self.app.state;
+        let ws_idx = app
+            .workspaces
+            .iter()
+            .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())?;
+        crate::ui::sidebar_morse_position(app, ws_idx, pane_id)
+            .map(crate::sound::SidebarPosition::encode)
     }
 
     fn send_notify_to_foreground_client(
@@ -2067,10 +2082,11 @@ impl HeadlessServer {
                             next_agent_label.as_deref(),
                         )
                     {
+                        let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
-                            None,
+                            body,
                         );
                     }
                 }
@@ -2159,10 +2175,11 @@ impl HeadlessServer {
                             next_agent_label.as_deref(),
                         )
                     {
+                        let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
-                            None,
+                            body,
                         );
                     }
                 }
@@ -3295,10 +3312,11 @@ impl HeadlessServer {
                     )
                 {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
+                    let body = self.sound_position_body(*pane_id);
                     self.send_notify_to_foreground_client(
                         protocol::NotifyKind::Sound,
                         sound_notify_message(sound),
-                        None,
+                        body,
                     );
                 }
             }

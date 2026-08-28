@@ -1764,7 +1764,8 @@ fn handle_notify_with_notifiers(
                 return;
             };
             if sound_config.enabled {
-                crate::sound::play(sound, sound_config);
+                let position = body.and_then(crate::sound::SidebarPosition::decode);
+                crate::sound::play(sound, sound_config, position);
             }
         }
         NotifyKind::Toast => {

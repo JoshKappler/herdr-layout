@@ -793,6 +793,29 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
+/// 1-based sidebar location of a pane for the morse notification suffix:
+/// which space box counting down the left column, then which tab inside
+/// that space. None when the workspace row is not visible (collapsed group).
+pub(crate) fn sidebar_morse_position(
+    app: &AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+) -> Option<crate::sound::SidebarPosition> {
+    let space = workspace_list_entries(app).iter().position(|entry| {
+        let WorkspaceListEntry::Workspace {
+            ws_idx: entry_ws_idx,
+            ..
+        } = entry;
+        *entry_ws_idx == ws_idx
+    })? + 1;
+    let tab = app
+        .workspaces
+        .get(ws_idx)?
+        .find_tab_index_for_pane(pane_id)?
+        + 1;
+    Some(crate::sound::SidebarPosition { space, tab })
+}
+
 pub(crate) fn workspace_list_rect(area: Rect, _split_ratio: f32) -> Rect {
     // unified sidebar (Josh 2026-08-26): the space list owns the full column
     Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
@@ -2747,6 +2770,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     indented: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn sidebar_morse_position_counts_space_and_tab_top_down() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("one"),
+            crate::workspace::Workspace::test_new("two"),
+            crate::workspace::Workspace::test_new("three"),
+        ];
+        let tab_idx = app.workspaces[2].test_add_tab(None);
+        let pane_id = app.workspaces[2].tabs[tab_idx].root_pane;
+
+        assert_eq!(
+            sidebar_morse_position(&app, 2, pane_id),
+            Some(crate::sound::SidebarPosition { space: 3, tab: 2 })
+        );
+    }
+
+    #[test]
+    fn sidebar_morse_position_is_none_when_workspace_row_is_hidden() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+        ];
+        app.collapsed_space_keys.insert("repo-key".into());
+
+        assert_eq!(
+            sidebar_morse_position(&app, 1, app.workspaces[1].tabs[0].root_pane),
+            None
+        );
+        assert_eq!(
+            sidebar_morse_position(&app, 0, app.workspaces[0].tabs[0].root_pane),
+            Some(crate::sound::SidebarPosition { space: 1, tab: 1 })
         );
     }
 

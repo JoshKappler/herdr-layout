@@ -1238,7 +1238,9 @@ impl App {
             return;
         }
         if let Some(sound) = sound.to_sound() {
-            crate::sound::play(sound, &self.state.sound);
+            // API-requested notifications have no originating pane, so no
+            // morse position suffix.
+            crate::sound::play(sound, &self.state.sound, None);
         }
     }
 

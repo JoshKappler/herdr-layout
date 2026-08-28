@@ -1,8 +1,10 @@
 //! Sound notifications for agent state changes.
 //!
-//! Embeds mp3 files in the binary and plays them via system audio tools.
-//! Uses afplay (macOS), Windows MediaPlayer, or decoder-capable Linux audio
-//! players — no Rust audio dependencies.
+//! Synthesizes notification audio (see [`synth`]) and plays it via system
+//! audio tools. Uses afplay (macOS), Windows MediaPlayer, or decoder-capable
+//! Linux audio players — no Rust audio dependencies.
+
+mod synth;
 
 use std::io::Write;
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -24,8 +26,6 @@ const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
 const AUDIO_PLAYER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 static SOUND_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
-static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 
 /// Which notification sound to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +36,33 @@ pub enum Sound {
     Request,
 }
 
-/// Play a notification sound in a background thread.
+/// Sidebar location of the pane behind a notification, both 1-based: `space`
+/// counts boxes down the left column, `tab` counts tabs inside that space.
+/// Rendered as a morse suffix: one long beep per space, one short per tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarPosition {
+    pub space: usize,
+    pub tab: usize,
+}
+
+impl SidebarPosition {
+    /// "space.tab" form carried in the notify message body.
+    pub fn encode(self) -> String {
+        format!("{}.{}", self.space, self.tab)
+    }
+
+    pub fn decode(value: &str) -> Option<Self> {
+        let (space, tab) = value.split_once('.')?;
+        let space = space.parse().ok().filter(|n| *n >= 1)?;
+        let tab = tab.parse().ok().filter(|n| *n >= 1)?;
+        Some(Self { space, tab })
+    }
+}
+
+/// Play a notification sound in a background thread, followed by the morse
+/// position suffix when the triggering pane's sidebar location is known.
 /// Silently does nothing if no audio player is available.
-pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
+pub fn play(sound: Sound, config: &crate::config::SoundConfig, position: Option<SidebarPosition>) {
     if sound_playback_disabled_by_env() {
         return;
     }
@@ -47,19 +71,21 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
     std::thread::spawn(move || {
         if let Some(path) = custom_path {
             match play_file(&path) {
-                Ok(()) => return,
+                Ok(()) => {
+                    if let Some(position) = position {
+                        if let Err(err) = play_bytes(&synth::render_morse_wav(position)) {
+                            warn!(sound = ?sound, err = %err, "morse position playback failed");
+                        }
+                    }
+                    return;
+                }
                 Err(err) => {
                     warn!(path = %path.display(), sound = ?sound, err = %err, "custom sound playback failed, falling back to built-in sound")
                 }
             }
         }
 
-        let data = match sound {
-            Sound::Done => SOUND_DONE,
-            Sound::Request => SOUND_REQUEST,
-        };
-
-        if let Err(err) = play_bytes(data) {
+        if let Err(err) = play_bytes(&synth::render_notification_wav(sound, position)) {
             warn!(sound = ?sound, err = %err, "sound playback failed");
         }
     });
@@ -97,7 +123,7 @@ fn play_bytes(data: &[u8]) -> Result<(), String> {
 
 fn temp_sound_path() -> PathBuf {
     let id = SOUND_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("herdr-sound-{}-{id}.mp3", std::process::id()))
+    std::env::temp_dir().join(format!("herdr-sound-{}-{id}.wav", std::process::id()))
 }
 
 #[cfg(windows)]
@@ -335,6 +361,20 @@ mod tests {
     #[test]
     fn temp_sound_paths_are_unique() {
         assert_ne!(temp_sound_path(), temp_sound_path());
+    }
+
+    #[test]
+    fn sidebar_position_round_trips_through_encode() {
+        let position = SidebarPosition { space: 3, tab: 2 };
+        assert_eq!(position.encode(), "3.2");
+        assert_eq!(SidebarPosition::decode("3.2"), Some(position));
+    }
+
+    #[test]
+    fn sidebar_position_decode_rejects_malformed_bodies() {
+        for body in ["", "3", "3.", ".2", "0.2", "3.0", "a.b", "3.2.1"] {
+            assert_eq!(SidebarPosition::decode(body), None, "body {body:?}");
+        }
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
