@@ -2862,26 +2862,35 @@ impl AppState {
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
         let now = Instant::now();
-        let (mutation, managed_changed, agent_name_changed, unchanged_change) = {
+        let (mutation, managed_changed, agent_name_changed, unchanged_change, entered_bg_wait) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
+            let was_waiting = matches!(terminal.state, AgentState::Working) && terminal.bg_wait;
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let unchanged_change = (mutation.agent_released || agent_name_changed)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
+            let entered_bg_wait =
+                !was_waiting && matches!(terminal.state, AgentState::Working) && terminal.bg_wait;
             (
                 mutation,
                 managed_changed,
                 agent_name_changed,
                 unchanged_change,
+                entered_bg_wait,
             )
         };
         if mutation.session_ref_changed || managed_changed || agent_name_changed {
             self.mark_session_dirty();
         }
         let agent_released = mutation.agent_released;
-        let change = mutation.effective_state_change.or(unchanged_change)?;
+        let Some(change) = mutation.effective_state_change.or(unchanged_change) else {
+            if entered_bg_wait {
+                self.apply_bg_wait_entry(ws_idx, pane_id);
+            }
+            return None;
+        };
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -2892,7 +2901,10 @@ impl AppState {
                     .map(|d| d.as_millis() as u64);
             }
         }
-        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+        let mut seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
+        if entered_bg_wait {
+            seen = self.apply_bg_wait_entry(ws_idx, pane_id).unwrap_or(seen);
+        }
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -2979,13 +2991,21 @@ impl AppState {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+        let bg_wait = self.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(|terminal| terminal.bg_wait);
         let pane = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
         if change.state != AgentState::Idle {
-            pane.seen = true;
+            // While Working with bg_wait, seen tracks the purple waiting dot;
+            // label or title churn must not mark it viewed.
+            if !(matches!(change.state, AgentState::Working) && bg_wait) {
+                pane.seen = true;
+            }
         } else if is_completion_transition(change) {
             pane.seen = suppress_active_tab_notifications;
         }
@@ -2995,6 +3015,20 @@ impl AppState {
             self.apply_agent_notification_delivery(&delivery);
         }
 
+        Some(seen)
+    }
+
+    /// Entering the turn-over-but-waiting condition (Working with bg_wait)
+    /// mirrors the completion convention: the pane goes unseen unless its
+    /// tab is active and the outer terminal is focused.
+    fn apply_bg_wait_entry(&mut self, ws_idx: usize, pane_id: PaneId) -> Option<bool> {
+        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let seen = active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+        let pane = self.workspaces[ws_idx]
+            .tabs
+            .iter_mut()
+            .find_map(|tab| tab.panes.get_mut(&pane_id))?;
+        pane.seen = seen;
         Some(seen)
     }
 
@@ -4653,6 +4687,102 @@ mod tests {
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(pane.seen);
+    }
+
+    fn state_changed_event(pane_id: PaneId, state: AgentState, bg_wait: bool) -> AppEvent {
+        AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state,
+            visible_blocker: false,
+            visible_working: false,
+            bg_wait,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn bg_wait_flip_in_background_marks_unseen() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, false));
+        assert!(state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, true));
+        assert!(!state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
+    }
+
+    #[test]
+    fn bg_wait_flip_on_focused_active_pane_stays_seen() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(state_changed_event(pane_id, AgentState::Working, false));
+        state.handle_app_event(state_changed_event(pane_id, AgentState::Working, true));
+
+        assert!(state.workspaces[0].panes.get(&pane_id).unwrap().seen);
+    }
+
+    #[test]
+    fn switch_workspace_marks_bg_wait_pane_seen() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, false));
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, true));
+        assert!(!state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
+
+        state.switch_workspace(1);
+        assert!(state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
+    }
+
+    #[test]
+    fn bg_wait_flip_fires_no_notification() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.active = Some(0);
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, false));
+
+        let updates =
+            state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, true));
+
+        assert!(updates.is_empty());
+        assert!(state.toast.is_none());
+        assert!(state.pending_agent_notifications.is_empty());
+    }
+
+    #[test]
+    fn metadata_churn_while_bg_wait_keeps_unseen() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, false));
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, true));
+        assert!(!state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
+
+        state.handle_app_event(AppEvent::HookMetadataReported {
+            pane_id: bg_pane_id,
+            source: "user:pi-display".into(),
+            agent_label: None,
+            applies_to_source: None,
+            title: Some("still running tasks".into()),
+            display_agent: None,
+            state_labels: std::collections::HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            seq: None,
+            ttl: None,
+        });
+
+        assert!(!state.workspaces[1].panes.get(&bg_pane_id).unwrap().seen);
     }
 
     #[test]
