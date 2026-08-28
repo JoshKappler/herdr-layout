@@ -718,6 +718,136 @@ fn claude_activity_line_is_working_even_with_no_title() {
     assert!(result.visible_working);
 }
 
+// The teal-then-yellow flap of 2026-08-27: an unfocused claude 2.1.248 pauses
+// its title-frame animation, the stale spinner title expires mid-turn, and
+// these real working frames were the ones the screen ruleset missed.
+
+#[test]
+fn claude_api_retry_banner_is_working() {
+    let screen = "\u{273B} Waiting for API response · will retry in 8s · check your network\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+    assert!(!result.bg_wait);
+}
+
+#[test]
+fn claude_lower_priority_retry_banner_is_working() {
+    let screen = "\u{273B} Working at lower priority · waiting for capacity · next try in 4m · attempt 2 · esc to interrupt\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_narrow_pane_thinking_clause_is_working() {
+    // a narrow pane drops the elapsed clock, so the paren group opens with
+    // the thinking clause instead of a digit
+    let screen = "\u{2733} Deliberating\u{2026} (still thinking)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+// The yellow-instead-of-purple state of 2026-08-27: the turn is over, only
+// subagents still run, and the half-moon title keeps animating, so it never
+// goes stale and outranked every background_wait screen rule.
+
+#[test]
+fn claude_agent_rows_after_turn_outrank_spinning_title_as_background_wait() {
+    // probe capture from pane w4N:p3; the agent list is the only evidence
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏺ main\n\
+        ◯ general-purpose  Checking pane suite failures   32m 15s · ↓ 241.9k tokens\n\
+        ⏵⏵ bypass permissions on · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ Herdr sidebar status indicator", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_background_shell_bar_outranks_spinning_title() {
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ gt video demo", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_live_turn_outranks_background_rows_and_title() {
+    // mid-turn stays plain yellow even with agent rows, a shell count, and a
+    // spinning title all present
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏺ main\n\
+        ◯ general-purpose  Checking pane suite failures   2m 3s · ↓ 4.1k tokens\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ gt video demo", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_prompt_box_without_turn_chrome_stays_idle_after_stale_title() {
+    // guard: with the spinner row gone and the title expired, a finished
+    // turn must still read idle, or the yellow pin comes back
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_idle);
+}
+
 #[test]
 fn claude_background_shell_bar_is_a_background_wait() {
     // the ⏸⏵ status row keeps counting shells after the turn ends
