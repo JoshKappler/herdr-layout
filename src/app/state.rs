@@ -194,7 +194,7 @@ impl Palette {
             overlay1: Color::White,
             text: Color::Reset,
             subtext0: Color::Gray,
-            mauve: Color::Gray,
+            mauve: Color::Magenta,
             green: Color::Green,
             yellow: Color::Yellow,
             red: Color::LightRed,
