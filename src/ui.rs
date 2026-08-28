@@ -453,6 +453,7 @@ pub fn render_with_runtime_registry(
         render_empty(app, frame, terminal_area);
     }
 
+    render_btw_fork_button(app, frame);
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
@@ -488,6 +489,32 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
+}
+
+/// Floating "btw" button in the terminal area's top-right corner; forks the
+/// focused pane's Claude session on click. Same chrome as the sidebar header
+/// buttons, cleared like a toast since it sits over pane content.
+fn render_btw_fork_button(app: &AppState, frame: &mut Frame) {
+    let rect = app.btw_fork_button_rect();
+    if rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let p = &app.palette;
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(Style::default().fg(p.text))
+        .style(Style::default().bg(p.panel_bg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(Span::styled(
+            "btw",
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(ratatui::layout::Alignment::Center),
+        inner,
+    );
 }
 
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {

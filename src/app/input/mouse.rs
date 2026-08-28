@@ -63,6 +63,11 @@ pub(super) enum MouseAction {
         path: Vec<bool>,
         ratio: f32,
     },
+    BtwFork {
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        session_id: String,
+    },
     RenameModal(ModalAction),
     ConfirmCloseAccept,
     ContextMenu {
@@ -450,6 +455,10 @@ impl AppState {
                 }
 
                 if !in_sidebar {
+                    if self.on_btw_fork_button(mouse.column, mouse.row) {
+                        return self.btw_fork_action();
+                    }
+
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         let grab_offset = match border.direction {
                             Direction::Horizontal => border.pos.saturating_sub(mouse.column),
@@ -1583,6 +1592,68 @@ impl AppState {
             && row < area.y + area.height
             && col >= area.x
             && col < area.x + area.width
+    }
+
+    /// Session id of the focused pane's agent session when it is a resumable
+    /// Claude session; the btw fork button only exists for those.
+    pub(crate) fn focused_pane_claude_session_id(&self) -> Option<String> {
+        let ws = self.active.and_then(|ws_idx| self.workspaces.get(ws_idx))?;
+        let terminal_id = ws.terminal_id(ws.focused_pane_id()?)?;
+        let terminal = self.terminals.get(terminal_id)?;
+        let (source, agent, session_ref) = match terminal.hook_authority.as_ref() {
+            Some(authority) if authority.session_ref.is_some() => (
+                authority.source.as_str(),
+                authority.agent_label.as_str(),
+                authority.session_ref.as_ref()?,
+            ),
+            _ => {
+                let session = terminal.persisted_agent_session.as_ref()?;
+                (
+                    session.source.as_str(),
+                    session.agent.as_str(),
+                    &session.session_ref,
+                )
+            }
+        };
+        (agent == "claude" && crate::agent_resume::plan(source, agent, session_ref).is_some())
+            .then(|| session_ref.value.clone())
+    }
+
+    /// The btw fork button in the top-right corner of the terminal area.
+    /// Hidden (zero rect) without a focused Claude session, outside terminal
+    /// mode, on mobile, or while a toast occupies the same corner.
+    pub(crate) fn btw_fork_button_rect(&self) -> Rect {
+        const WIDTH: u16 = 7; // "btw" plus the header-button borders and padding
+        const HEIGHT: u16 = 3;
+        let area = self.view.terminal_area;
+        if self.view.layout == ViewLayout::Mobile
+            || self.mode != Mode::Terminal
+            || area.width < WIDTH
+            || area.height < HEIGHT
+            || self.focused_pane_claude_session_id().is_none()
+        {
+            return Rect::default();
+        }
+        let rect = Rect::new(area.x + area.width - WIDTH, area.y, WIDTH, HEIGHT);
+        if rect.intersects(self.view.toast_hit_area) {
+            return Rect::default();
+        }
+        rect
+    }
+
+    pub(super) fn on_btw_fork_button(&self, col: u16, row: u16) -> bool {
+        rect_contains(self.btw_fork_button_rect(), col, row)
+    }
+
+    fn btw_fork_action(&self) -> Option<MouseAction> {
+        let ws_idx = self.active?;
+        let pane_id = self.workspaces.get(ws_idx)?.focused_pane_id()?;
+        let session_id = self.focused_pane_claude_session_id()?;
+        Some(MouseAction::BtwFork {
+            ws_idx,
+            pane_id,
+            session_id,
+        })
     }
 
     pub(super) fn find_border_at(&self, col: u16, row: u16) -> Option<&SplitBorder> {
@@ -4260,5 +4331,228 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    fn claude_test_session(session_id: &str) -> crate::agent_resume::PersistedAgentSession {
+        crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
+        }
+    }
+
+    #[test]
+    fn btw_fork_button_rect_requires_focused_claude_session() {
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("btw");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+
+        assert_eq!(app.state.btw_fork_button_rect(), Rect::default());
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        assert_eq!(
+            app.state.btw_fork_button_rect(),
+            Rect::default(),
+            "non-claude sessions get no fork button"
+        );
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .persisted_agent_session = Some(claude_test_session("btw-session"));
+        let area = app.state.view.terminal_area;
+        let rect = app.state.btw_fork_button_rect();
+        assert_eq!(rect, Rect::new(area.x + area.width - 7, area.y, 7, 3));
+        assert_eq!(
+            app.state.focused_pane_claude_session_id().as_deref(),
+            Some("btw-session")
+        );
+
+        app.state.view.toast_hit_area = rect;
+        assert_eq!(
+            app.state.btw_fork_button_rect(),
+            Rect::default(),
+            "a toast over the corner hides the button"
+        );
+        app.state.view.toast_hit_area = Rect::default();
+
+        app.state.mode = Mode::Navigate;
+        assert_eq!(app.state.btw_fork_button_rect(), Rect::default());
+    }
+
+    #[cfg(unix)]
+    fn shell_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn btw_fork_button_click_splits_top_third_and_types_fork_command() {
+        let _guard = shell_env_lock().lock().unwrap();
+        let original_shell = std::env::var_os("SHELL");
+        std::env::set_var("SHELL", "/bin/sh");
+
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("btw");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        // A mouse-reporting runtime under the button would see any forwarded click.
+        let info = app.state.view.pane_infos[0].clone();
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                4,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .persisted_agent_session = Some(claude_test_session("btw-session"));
+
+        let rect = app.state.btw_fork_button_rect();
+        assert_ne!(rect, Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 3,
+            rect.y + 1,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            rect.x + 3,
+            rect.y + 1,
+        ));
+
+        assert!(
+            input_rx.try_recv().is_err(),
+            "a button click must not forward to the pane underneath"
+        );
+        assert!(app.state.selection.is_none());
+
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(tab.layout.pane_count(), 2);
+        let new_pane_id = tab.layout.focused();
+        assert_ne!(new_pane_id, pane_id);
+        let panes = tab.layout.panes(Rect::new(0, 0, 90, 30));
+        let new_info = panes.iter().find(|p| p.id == new_pane_id).unwrap();
+        let old_info = panes.iter().find(|p| p.id == pane_id).unwrap();
+        assert!(new_info.rect.y < old_info.rect.y, "fork pane sits on top");
+        assert_eq!(new_info.rect.height, 10, "fork pane holds the top third");
+
+        let expected = "claude --resume btw-session --fork-session";
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, new_pane_id)
+            .expect("fork pane should have a runtime");
+        for _ in 0..40 {
+            if runtime
+                .snapshot_history()
+                .is_some_and(|text| text.contains(expected))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            runtime
+                .snapshot_history()
+                .expect("fork pane runtime should expose history")
+                .contains(expected),
+            "the fork command should be typed into the new pane"
+        );
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        match original_shell {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn btw_fork_button_leaves_other_clicks_alone() {
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("btw");
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let info = app.state.view.pane_infos[0].clone();
+        let (runtime, _input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                0,
+                b"",
+                4,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+        let area = app.state.view.terminal_area;
+        let corner = (area.x + area.width - 4, area.y + 1);
+
+        // Without a Claude session the corner behaves like plain pane content.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            corner.0,
+            corner.1,
+        ));
+        assert!(app.state.selection.is_some());
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            corner.0,
+            corner.1,
+        ));
+
+        // With the button visible, clicks elsewhere in the pane still select.
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .persisted_agent_session = Some(claude_test_session("btw-session"));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            info.inner_rect.x + 2,
+            info.inner_rect.y + 4,
+        ));
+        assert!(app.state.selection.is_some());
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
     }
 }

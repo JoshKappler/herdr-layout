@@ -14,7 +14,76 @@ struct PendingAgentResumeCandidate {
     cols: u16,
 }
 
+/// First-child share the fork target keeps after its split; the new pane
+/// gets the rest, then swaps up to hold the top third.
+const BTW_FORK_SPLIT_RATIO: f32 = 1.0 / 3.0;
+
 impl App {
+    /// Fork the pane's Claude session into a new pane covering the top third
+    /// of its area: split below the pane, swap the new pane up, then type the
+    /// fork command into its fresh shell (the deferred-resume delivery).
+    pub(crate) fn btw_fork_pane(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        session_id: &str,
+    ) {
+        let Some(target_public_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return;
+        };
+        self.runtime_pane_split(
+            "tui.mouse.btw.split",
+            crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(target_public_id.clone()),
+                direction: crate::api::schema::SplitDirection::Down,
+                ratio: Some(BTW_FORK_SPLIT_RATIO),
+                cwd: None,
+                focus: true,
+                env: Default::default(),
+            },
+        );
+        let Some(new_pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+            .filter(|new_pane_id| *new_pane_id != pane_id)
+        else {
+            tracing::warn!(pane = pane_id.raw(), "btw fork split created no pane");
+            return;
+        };
+        let Some(new_public_id) = self.public_pane_id(ws_idx, new_pane_id) else {
+            return;
+        };
+        self.runtime_pane_swap(
+            "tui.mouse.btw.swap",
+            crate::api::schema::PaneSwapParams {
+                pane_id: None,
+                direction: None,
+                source_pane_id: Some(new_public_id.clone()),
+                target_pane_id: Some(target_public_id),
+            },
+        );
+        let argv = [
+            "claude".to_string(),
+            "--resume".to_string(),
+            session_id.to_string(),
+            "--fork-session".to_string(),
+        ];
+        let Some(mut command) = shell_command_from_argv(&argv) else {
+            return;
+        };
+        command.push('\r');
+        self.dispatch_runtime_mutation(
+            "tui.mouse.btw.send",
+            crate::api::schema::Method::PaneSendText(crate::api::schema::PaneSendTextParams {
+                pane_id: new_public_id,
+                text: command,
+            }),
+        );
+    }
+
     pub(crate) fn has_pending_agent_resumes(&self) -> bool {
         self.state
             .terminals
