@@ -224,8 +224,7 @@ pub(crate) struct TabDash {
 const TAB_LANE_KEYS: [&str; 7] = ["l1", "l2", "l3", "l4", "l5", "l6", "lmore"];
 
 /// The tab status cell, shared by both sidebars. Purple means the turn is
-/// over but background work still runs, regardless of read state; the
-/// lifecycle reads yellow → purple → teal → green (Josh 2026-08-27).
+/// over but background work still runs: fisheye until seen, solid after.
 fn tab_status_cell(
     state: AgentState,
     seen: bool,
@@ -236,7 +235,8 @@ fn tab_status_cell(
     let done_waiting = (matches!(state, AgentState::Working) && bg_wait)
         || (matches!(state, AgentState::Idle) && subs_live);
     if done_waiting {
-        return ("⬤", Style::default().fg(p.mauve));
+        let sym = if seen { "⬤" } else { "◉" };
+        return (sym, Style::default().fg(p.mauve));
     }
     state_dot(state, seen, p)
 }
@@ -1825,7 +1825,7 @@ mod tests {
         let p = crate::app::state::AppState::test_new().palette;
 
         let (sym, style) = tab_status_cell(AgentState::Working, false, true, false, &p);
-        assert_eq!(sym, "⬤");
+        assert_eq!(sym, "◉");
         assert_eq!(style.fg, Some(p.mauve));
         assert_eq!(style.bg, None);
 
@@ -1835,7 +1835,7 @@ mod tests {
         assert_eq!(style.bg, None);
 
         let (sym, style) = tab_status_cell(AgentState::Idle, false, false, true, &p);
-        assert_eq!(sym, "⬤");
+        assert_eq!(sym, "◉");
         assert_eq!(style.fg, Some(p.mauve));
         assert_eq!(style.bg, None);
 
