@@ -1564,14 +1564,6 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let is_drop_target = matches!(
-            app.drag.as_ref().map(|drag| &drag.target),
-            Some(crate::app::state::DragTarget::SidebarTabMove {
-                source_ws_idx,
-                target_ws_idx: Some(target),
-                ..
-            }) if *target == i && *source_ws_idx != i
-        );
         let name_style = if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -1639,7 +1631,8 @@ fn render_workspace_list(
                 break;
             }
             let tab_is_active = is_active && dash.tab_idx == ws.active_tab;
-            let highlighted = selected || is_dragged || is_drop_target || tab_is_active;
+            // drags get the accent insertion line only, never the sprout
+            let highlighted = selected || tab_is_active;
             let top = y;
             let bottom = y + box_h - 1;
             for by in y..y + box_h {
@@ -1880,6 +1873,34 @@ mod tests {
         let idle = buffer[(find_symbol_x(buffer, idle_tab_row, 25, "s"), idle_tab_row)].style();
         assert_eq!(idle.fg, Some(app.palette.text));
         assert_eq!(idle.bg, Some(ratatui::style::Color::Reset));
+    }
+
+    #[test]
+    fn tab_drag_between_spaces_leaves_source_and_target_boxes_thin() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.active = None;
+        app.mode = Mode::Terminal;
+        app.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::SidebarTabMove {
+                source_ws_idx: 0,
+                source_tab_idx: 0,
+                target_ws_idx: Some(1),
+                insert_idx: None,
+            },
+        });
+        let area = Rect::new(0, 0, 26, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let first_row = app.view.workspace_card_areas[0].rect.y;
+        let second_row = app.view.workspace_card_areas[1].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(1, first_row)].symbol(), "┌");
+        assert_eq!(buffer[(1, second_row)].symbol(), "┌");
     }
 
     #[test]
