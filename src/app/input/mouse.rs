@@ -1653,10 +1653,10 @@ impl AppState {
             .then(|| session_ref.value.clone())
     }
 
-    /// Once a claude session is confirmed for the focused terminal, keep
-    /// answering with it while hook authority lapses and re-reports, which
-    /// otherwise blinks the btw button; the latch drops when the terminal's
-    /// effective agent stops reading claude or focus moves terminals.
+    /// The gate and the agent label both read as absent for moments during
+    /// authority lapses and streaming screen updates, which blinks the btw
+    /// button. Only positive evidence moves the latch (a different agent
+    /// identified, focus elsewhere, a gone pane); a momentary None never does.
     pub(crate) fn refresh_btw_session_latch(&mut self) {
         let Some(terminal_id) = self.focused_terminal_id().cloned() else {
             self.btw_session_latch = None;
@@ -1670,11 +1670,13 @@ impl AppState {
             .btw_session_latch
             .as_ref()
             .is_some_and(|(latched, _)| *latched == terminal_id)
-            && self
-                .terminals
-                .get(&terminal_id)
-                .and_then(|terminal| terminal.effective_agent_label())
-                == Some("claude");
+            && match self.terminals.get(&terminal_id) {
+                Some(terminal) => !matches!(
+                    terminal.effective_agent_label(),
+                    Some(label) if label != "claude"
+                ),
+                None => false,
+            };
         if !keep {
             self.btw_session_latch = None;
         }
@@ -1686,13 +1688,7 @@ impl AppState {
         }
         let terminal_id = self.focused_terminal_id()?;
         let (latched, session_id) = self.btw_session_latch.as_ref()?;
-        (latched == terminal_id
-            && self
-                .terminals
-                .get(terminal_id)
-                .and_then(|terminal| terminal.effective_agent_label())
-                == Some("claude"))
-        .then(|| session_id.clone())
+        (latched == terminal_id).then(|| session_id.clone())
     }
 
     /// The btw fork button in the top-right corner of the terminal area.
@@ -4577,8 +4573,18 @@ mod tests {
             "clicks during the lapse fork the latched session"
         );
 
-        // the agent actually leaves the pane: latch drops, button hides
+        // detection blanks for a frame while output streams: still steady
         app.state.terminals.get_mut(&terminal_id).unwrap().detected_agent = None;
+        app.state.refresh_btw_session_latch();
+        assert_eq!(
+            app.state.btw_fork_button_rect(),
+            visible,
+            "a momentary identity blank must not blink the button"
+        );
+
+        // a different agent is positively identified: latch drops
+        app.state.terminals.get_mut(&terminal_id).unwrap().detected_agent =
+            Some(crate::detect::Agent::Codex);
         app.state.refresh_btw_session_latch();
         assert_eq!(app.state.btw_fork_button_rect(), Rect::default());
         assert_eq!(app.state.focused_pane_claude_session_id(), None);
