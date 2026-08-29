@@ -43,7 +43,8 @@ use crate::ipc::{
     SocketFileIdentity,
 };
 use crate::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
+    self, AttachScrollDirection, AttachScrollSource, CellData, FrameData, ServerMessage,
+    MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
 #[cfg(unix)]
@@ -183,6 +184,27 @@ fn apply_terminal_dirty_patch(
         frame.cells[start..end].clone_from_slice(&row_cells);
     }
     true
+}
+
+fn frame_rect_cells(frame: &FrameData, rect: Rect) -> Option<Vec<CellData>> {
+    if rect.width == 0 || rect.height == 0 || !rect_fits_frame(rect, frame) {
+        return None;
+    }
+    let width = usize::from(frame.width);
+    let mut cells = Vec::with_capacity(usize::from(rect.width) * usize::from(rect.height));
+    for y in rect.y..rect.y + rect.height {
+        let start = usize::from(y) * width + usize::from(rect.x);
+        cells.extend_from_slice(&frame.cells[start..start + usize::from(rect.width)]);
+    }
+    Some(cells)
+}
+
+fn restore_frame_rect_cells(frame: &mut FrameData, rect: Rect, cells: &[CellData]) {
+    let width = usize::from(frame.width);
+    for (row, row_cells) in cells.chunks(usize::from(rect.width)).enumerate() {
+        let start = (usize::from(rect.y) + row) * width + usize::from(rect.x);
+        frame.cells[start..start + row_cells.len()].clone_from_slice(row_cells);
+    }
 }
 
 fn dirty_patch_intersects_hyperlinks(
@@ -3441,6 +3463,11 @@ impl HeadlessServer {
             retained_fallback!("no_pane_info");
         }
 
+        // The btw button floats over pane content, so pane patches must not
+        // paint through it; its cells are put back after the patch loop.
+        let btw_rect = self.app.state.btw_fork_button_rect();
+        let btw_cells = frame_rect_cells(&frame, btw_rect);
+
         let mut touched = false;
         for info in pane_infos {
             if !rect_fits_frame(info.inner_rect, &frame) {
@@ -3471,6 +3498,12 @@ impl HeadlessServer {
                     }
                     touched = true;
                 }
+            }
+        }
+
+        if touched {
+            if let Some(cells) = &btw_cells {
+                restore_frame_rect_cells(&mut frame, btw_rect, cells);
             }
         }
 
@@ -7931,6 +7964,74 @@ next_tab = ""
         );
         assert!(patched.cells.iter().any(|cell| cell.symbol == "Z"));
         assert_eq!((patched.width, patched.height), (80, 24));
+    }
+
+    fn frame_cells_text(frame: &FrameData, x: u16, y: u16, len: u16) -> String {
+        let start = usize::from(y) * usize::from(frame.width) + usize::from(x);
+        frame.cells[start..start + usize::from(len)]
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_keeps_btw_button_over_patched_pane_rows() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        {
+            let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.hook_authority = Some(crate::terminal::state::HookAuthority {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                reported_at: std::time::Instant::now(),
+                session_ref: Some(
+                    crate::agent_resume::AgentSessionRef::id("retained-session").unwrap(),
+                ),
+            });
+        }
+
+        server.render_and_stream();
+        let first = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
+        let rect = server.app.state.btw_fork_button_rect();
+        assert_ne!(rect, Rect::default(), "button shows for a live claude session");
+        assert_eq!(
+            frame_cells_text(&first, rect.x + 2, rect.y + 1, 3),
+            "btw",
+            "full render draws the button"
+        );
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let mut streamed = Vec::from(&b"\x1b[1;1H"[..]);
+        streamed.extend(std::iter::repeat(b'X').take(400));
+        runtime.test_process_pty_bytes(&streamed);
+
+        assert!(server.render_retained_pty_update_and_stream());
+        let patched = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained frame"),
+        );
+        assert!(patched.cells.iter().any(|cell| cell.symbol == "X"));
+        assert_eq!(
+            frame_cells_text(&patched, rect.x + 2, rect.y + 1, 3),
+            "btw",
+            "a retained pane patch must not paint over the btw button"
+        );
     }
 
     #[tokio::test]
