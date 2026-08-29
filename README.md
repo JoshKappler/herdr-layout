@@ -1,6 +1,6 @@
 # herdr, my layout
 
-This is my working fork of [herdr](https://github.com/ogulcancelik/herdr) (Apache-2.0),
+This is my working fork of [herdr](https://github.com/ogulcancelik/herdr) (AGPL-3.0),
 the agent multiplexer I live in. It runs my nine-plus parallel Claude Code sessions on
 one ultrawide, so the UI got rebuilt around that: a boxed-tab sidebar on a space rail,
 a live colored action line per session, a native right-side detail panel with the
