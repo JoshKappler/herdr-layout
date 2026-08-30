@@ -1371,6 +1371,9 @@ pub struct PendingAgentNotification {
     pub kind: ToastKind,
     pub state: AgentState,
     pub deadline: std::time::Instant,
+    pub toast_delivered: bool,
+    /// The done morse waits out its own settle window past `deadline`.
+    pub sound_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

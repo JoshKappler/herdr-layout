@@ -22,6 +22,10 @@ use super::state::{
     ToastNotification, ToastTarget, ViewLayout,
 };
 
+/// A completed run must hold Idle this long before the done morse plays;
+/// turn boundaries in driven sessions idle briefly and then continue.
+const DONE_SOUND_SETTLE_SECONDS: u64 = 15;
+
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
@@ -31,6 +35,7 @@ fn is_completion_transition(change: &EffectiveStateChange) -> bool {
     is_completion_transition_parts(
         change.previous_state,
         change.state,
+        change.previous_settled_state,
         change.previous_agent_label.as_deref(),
         change.agent_label.as_deref(),
     )
@@ -46,12 +51,14 @@ fn public_tab_id_for_index(ws: &crate::workspace::Workspace, tab_idx: usize) -> 
 pub fn is_completion_transition_parts(
     previous_state: AgentState,
     state: AgentState,
+    previous_settled_state: AgentState,
     previous_agent_label: Option<&str>,
     agent_label: Option<&str>,
 ) -> bool {
     is_background_completion_transition(previous_state, state)
         || (previous_state == AgentState::Unknown
             && state == AgentState::Idle
+            && previous_settled_state != AgentState::Idle
             && previous_agent_label.is_some()
             && previous_agent_label == agent_label)
 }
@@ -89,6 +96,7 @@ pub fn notification_sound_for_state_change_with_agent_labels(
     suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
+    prev_settled_state: AgentState,
     previous_agent_label: Option<&str>,
     agent_label: Option<&str>,
 ) -> Option<crate::sound::Sound> {
@@ -102,6 +110,7 @@ pub fn notification_sound_for_state_change_with_agent_labels(
             if is_completion_transition_parts(
                 prev_state,
                 new_state,
+                prev_settled_state,
                 previous_agent_label,
                 agent_label,
             ) && !suppress_active_tab_notifications =>
@@ -135,6 +144,7 @@ pub fn notification_toast_for_state_change_with_agent_labels(
     suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
+    prev_settled_state: AgentState,
     previous_agent_label: Option<&str>,
     agent_label: Option<&str>,
 ) -> Option<ToastKind> {
@@ -148,6 +158,7 @@ pub fn notification_toast_for_state_change_with_agent_labels(
             if is_completion_transition_parts(
                 prev_state,
                 new_state,
+                prev_settled_state,
                 previous_agent_label,
                 agent_label,
             ) =>
@@ -185,6 +196,7 @@ pub fn notification_toast_for_pane_state_update(
         suppress_active_tab_notifications,
         update.previous_state,
         update.state,
+        update.previous_settled_state,
         update.previous_agent_label.as_deref(),
         update.agent_label.as_deref(),
     )
@@ -239,6 +251,7 @@ pub struct PaneStateUpdate {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_settled_state: AgentState,
     pub previous_seen: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
     pub agent_label: Option<String>,
@@ -1044,6 +1057,7 @@ impl AppState {
                     previous_agent_label: change.previous_agent_label.clone(),
                     previous_known_agent: change.previous_known_agent,
                     previous_state: change.previous_state,
+                    previous_settled_state: change.previous_settled_state,
                     previous_seen,
                     previous_presentation: change.previous_presentation.clone(),
                     agent_label: change.agent_label.clone(),
@@ -2911,6 +2925,7 @@ impl AppState {
             previous_agent_label: change.previous_agent_label.clone(),
             previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
+            previous_settled_state: change.previous_settled_state,
             previous_seen,
             previous_presentation: change.previous_presentation.clone(),
             agent_label: change.agent_label.clone(),
@@ -3038,7 +3053,13 @@ impl AppState {
         pane_id: PaneId,
         change: &EffectiveStateChange,
     ) -> Option<AgentNotificationDelivery> {
-        self.pending_agent_notifications.remove(&pane_id);
+        // Resumed activity cancels a pending alert; evidence lapses and
+        // presentation churn leave it armed, delivery revalidates the rest.
+        if change.state != change.previous_state
+            && matches!(change.state, AgentState::Working | AgentState::Blocked)
+        {
+            self.pending_agent_notifications.remove(&pane_id);
+        }
 
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
@@ -3063,16 +3084,61 @@ impl AppState {
         });
         let workspace_id = self.workspaces[ws_idx].id.clone();
 
+        let now = std::time::Instant::now();
+        let delay_seconds = self
+            .toast_config
+            .delay_seconds
+            .min(crate::config::MAX_TOAST_DELAY_SECONDS);
+        let deadline = now
+            .checked_add(std::time::Duration::from_secs(delay_seconds))
+            .unwrap_or(now);
+        let sound_deadline = matches!(sound, Some(crate::sound::Sound::Done)).then(|| {
+            let settle = delay_seconds.max(DONE_SOUND_SETTLE_SECONDS);
+            now.checked_add(std::time::Duration::from_secs(settle))
+                .unwrap_or(now)
+        });
+
         if self.toast_config.delay_seconds == 0 {
-            return self.agent_notification_delivery(
+            let Some(sound_deadline) = sound_deadline else {
+                return self.agent_notification_delivery(
+                    ws_idx,
+                    pane_id,
+                    workspace_id,
+                    agent_label,
+                    change.known_agent,
+                    kind,
+                    change.state,
+                    true,
+                    true,
+                );
+            };
+            // The toast goes out now; the done morse waits out the settle.
+            let delivery = self.agent_notification_delivery(
                 ws_idx,
                 pane_id,
-                workspace_id,
-                agent_label,
+                workspace_id.clone(),
+                agent_label.clone(),
                 change.known_agent,
                 kind,
                 change.state,
+                true,
+                false,
             );
+            self.pending_agent_notifications.insert(
+                pane_id,
+                PendingAgentNotification {
+                    pane_id,
+                    workspace_id,
+                    agent_label,
+                    known_agent: change.known_agent,
+                    kind,
+                    state: change.state,
+                    deadline,
+                    toast_delivered: true,
+                    sound_deadline: Some(sound_deadline),
+                },
+            );
+            return delivery;
         }
 
         self.pending_agent_notifications.insert(
@@ -3084,15 +3150,9 @@ impl AppState {
                 known_agent: change.known_agent,
                 kind,
                 state: change.state,
-                deadline: {
-                    let now = std::time::Instant::now();
-                    let delay_seconds = self
-                        .toast_config
-                        .delay_seconds
-                        .min(crate::config::MAX_TOAST_DELAY_SECONDS);
-                    now.checked_add(std::time::Duration::from_secs(delay_seconds))
-                        .unwrap_or(now)
-                },
+                deadline,
+                toast_delivered: false,
+                sound_deadline,
             },
         );
         None
@@ -3107,6 +3167,8 @@ impl AppState {
         known_agent: Option<Agent>,
         kind: ToastKind,
         expected_state: AgentState,
+        with_toast: bool,
+        with_sound: bool,
     ) -> Option<AgentNotificationDelivery> {
         let terminal_state = self
             .workspaces
@@ -3123,8 +3185,11 @@ impl AppState {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
-        let sound = sound_for_toast_kind(kind, suppress_active_tab_notifications)
-            .filter(|_| self.sound.allows(known_agent));
+        let sound = with_sound
+            .then(|| sound_for_toast_kind(kind, suppress_active_tab_notifications))
+            .flatten()
+            .filter(|_| self.sound.allows(known_agent))
+            .filter(|sound| *sound != crate::sound::Sound::Done || !terminal_state.bg_wait);
         let build_toast = || {
             let workspace_label = self.workspaces[ws_idx].display_name();
             let context =
@@ -3144,8 +3209,9 @@ impl AppState {
                 }),
             }
         };
-        let toast = (!is_active_tab).then(build_toast);
-        let client_notification = (!suppress_active_tab_notifications).then(build_toast);
+        let toast = (with_toast && !is_active_tab).then(build_toast);
+        let client_notification =
+            (with_toast && !suppress_active_tab_notifications).then(build_toast);
 
         if toast.is_none() && client_notification.is_none() && sound.is_none() {
             return None;
@@ -3190,7 +3256,10 @@ impl AppState {
     pub fn next_pending_agent_notification_deadline(&self) -> Option<std::time::Instant> {
         self.pending_agent_notifications
             .values()
-            .map(|pending| pending.deadline)
+            .flat_map(|pending| {
+                let toast = (!pending.toast_delivered).then_some(pending.deadline);
+                toast.into_iter().chain(pending.sound_deadline)
+            })
             .min()
     }
 
@@ -3201,12 +3270,16 @@ impl AppState {
         let due_panes: Vec<PaneId> = self
             .pending_agent_notifications
             .iter()
-            .filter_map(|(&pane_id, pending)| (pending.deadline <= now).then_some(pane_id))
+            .filter_map(|(&pane_id, pending)| {
+                let toast_due = !pending.toast_delivered && pending.deadline <= now;
+                let sound_due = pending.sound_deadline.is_some_and(|deadline| deadline <= now);
+                (toast_due || sound_due).then_some(pane_id)
+            })
             .collect();
         let mut deliveries = Vec::new();
 
         for pane_id in due_panes {
-            let Some(pending) = self.pending_agent_notifications.remove(&pane_id) else {
+            let Some(mut pending) = self.pending_agent_notifications.remove(&pane_id) else {
                 continue;
             };
             let Some(ws_idx) = self
@@ -3216,19 +3289,43 @@ impl AppState {
             else {
                 continue;
             };
-            let Some(delivery) = self.agent_notification_delivery(
-                ws_idx,
-                pending.pane_id,
-                pending.workspace_id,
-                pending.agent_label,
-                pending.known_agent,
-                pending.kind,
-                pending.state,
-            ) else {
-                continue;
-            };
-            self.apply_agent_notification_delivery(&delivery);
-            deliveries.push(delivery);
+            if !pending.toast_delivered && pending.deadline <= now {
+                pending.toast_delivered = true;
+                if let Some(delivery) = self.agent_notification_delivery(
+                    ws_idx,
+                    pending.pane_id,
+                    pending.workspace_id.clone(),
+                    pending.agent_label.clone(),
+                    pending.known_agent,
+                    pending.kind,
+                    pending.state,
+                    true,
+                    pending.sound_deadline.is_none(),
+                ) {
+                    self.apply_agent_notification_delivery(&delivery);
+                    deliveries.push(delivery);
+                }
+            }
+            if pending.sound_deadline.is_some_and(|deadline| deadline <= now) {
+                pending.sound_deadline = None;
+                if let Some(delivery) = self.agent_notification_delivery(
+                    ws_idx,
+                    pending.pane_id,
+                    pending.workspace_id.clone(),
+                    pending.agent_label.clone(),
+                    pending.known_agent,
+                    pending.kind,
+                    pending.state,
+                    false,
+                    true,
+                ) {
+                    self.apply_agent_notification_delivery(&delivery);
+                    deliveries.push(delivery);
+                }
+            }
+            if !pending.toast_delivered || pending.sound_deadline.is_some() {
+                self.pending_agent_notifications.insert(pane_id, pending);
+            }
         }
 
         deliveries
@@ -4932,6 +5029,179 @@ mod tests {
         assert!(state.pending_agent_notifications.is_empty());
         assert!(state.drain_due_agent_notifications(deadline).is_empty());
         assert!(state.toast.is_none());
+    }
+
+    fn drive_to_idle_completion(state: &mut AppState, pane_id: PaneId) {
+        state.handle_app_event(state_changed_event(pane_id, AgentState::Working, false));
+        state.handle_app_event(state_changed_event(pane_id, AgentState::Idle, false));
+    }
+
+    #[test]
+    fn delayed_done_sound_waits_past_toast_deadline() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        drive_to_idle_completion(&mut state, bg_pane_id);
+
+        let toast_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        let deliveries = state.drain_due_agent_notifications(toast_deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert!(
+            deliveries[0].sound.is_none(),
+            "the done morse must wait out the settle window"
+        );
+        assert!(deliveries[0].toast.is_some());
+        assert!(state.pending_agent_notifications.contains_key(&bg_pane_id));
+    }
+
+    #[test]
+    fn done_sound_plays_once_after_settle() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        drive_to_idle_completion(&mut state, bg_pane_id);
+
+        let toast_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        state.drain_due_agent_notifications(toast_deadline);
+        let sound_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        assert!(sound_deadline > toast_deadline);
+
+        let deliveries = state.drain_due_agent_notifications(sound_deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].sound, Some(crate::sound::Sound::Done));
+        assert!(deliveries[0].toast.is_none());
+        assert!(state.pending_agent_notifications.is_empty());
+        assert!(state
+            .drain_due_agent_notifications(sound_deadline + std::time::Duration::from_secs(60))
+            .is_empty());
+    }
+
+    #[test]
+    fn done_sound_cancelled_when_pane_resumes_before_settle() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        drive_to_idle_completion(&mut state, bg_pane_id);
+
+        let toast_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        let deliveries = state.drain_due_agent_notifications(toast_deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert!(
+            deliveries[0].sound.is_none(),
+            "a turn boundary must not ping before the settle window"
+        );
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Working, false));
+        assert!(state.pending_agent_notifications.is_empty());
+        assert!(state
+            .drain_due_agent_notifications(toast_deadline + std::time::Duration::from_secs(120))
+            .is_empty());
+    }
+
+    #[test]
+    fn idle_blip_does_not_rearm_done_sound() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        drive_to_idle_completion(&mut state, bg_pane_id);
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        state.drain_due_agent_notifications(deadline + std::time::Duration::from_secs(60));
+        assert!(state.pending_agent_notifications.is_empty());
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Unknown, false));
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Idle, false));
+
+        assert!(
+            state.pending_agent_notifications.is_empty(),
+            "an idle blip must not re-arm the done morse"
+        );
+    }
+
+    #[test]
+    fn done_sound_pending_survives_unknown_blip_before_settle() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        drive_to_idle_completion(&mut state, bg_pane_id);
+        let toast_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        state.drain_due_agent_notifications(toast_deadline);
+
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Unknown, false));
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Idle, false));
+        assert!(state.pending_agent_notifications.contains_key(&bg_pane_id));
+
+        let sound_deadline = state.next_pending_agent_notification_deadline().unwrap();
+        let deliveries = state.drain_due_agent_notifications(sound_deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].sound, Some(crate::sound::Sound::Done));
+        assert!(deliveries[0].toast.is_none());
+        assert!(state.pending_agent_notifications.is_empty());
+    }
+
+    #[test]
+    fn unknown_to_idle_completion_requires_non_idle_settled_state() {
+        let labels = (Some("pi"), Some("pi"));
+        assert!(is_completion_transition_parts(
+            AgentState::Unknown,
+            AgentState::Idle,
+            AgentState::Working,
+            labels.0,
+            labels.1,
+        ));
+        assert!(is_completion_transition_parts(
+            AgentState::Unknown,
+            AgentState::Idle,
+            AgentState::Unknown,
+            labels.0,
+            labels.1,
+        ));
+        assert!(!is_completion_transition_parts(
+            AgentState::Unknown,
+            AgentState::Idle,
+            AgentState::Idle,
+            labels.0,
+            labels.1,
+        ));
+    }
+
+    #[test]
+    fn blocked_siren_keeps_short_deadline() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.sound.enabled = true;
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        let armed_at = std::time::Instant::now();
+        state.handle_app_event(state_changed_event(bg_pane_id, AgentState::Blocked, false));
+
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        assert!(deadline <= armed_at + std::time::Duration::from_secs(5));
+        let deliveries = state.drain_due_agent_notifications(deadline);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].sound, Some(crate::sound::Sound::Request));
+        assert!(state.pending_agent_notifications.is_empty());
     }
 
     #[test]

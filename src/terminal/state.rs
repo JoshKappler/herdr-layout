@@ -69,6 +69,7 @@ pub struct EffectiveStateChange {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_settled_state: AgentState,
     pub previous_presentation: EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
@@ -122,6 +123,8 @@ pub struct TerminalState {
     metadata_report_sequences: HashMap<String, u64>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
+    /// Last non-Unknown state; detection gaps do not move it.
+    pub(crate) settled_state: AgentState,
     /// The turn is over but shells, agents, or tasks still run (Josh 2026-08-27).
     pub bg_wait: bool,
     pub last_agent_state_change_seq: Option<u64>,
@@ -158,6 +161,7 @@ impl TerminalState {
             metadata_report_sequences: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
+            settled_state: AgentState::Unknown,
             bg_wait: false,
             last_agent_state_change_seq: None,
             last_agent_state_change_at: None,
@@ -1355,6 +1359,7 @@ impl TerminalState {
             previous_agent_label: agent_label.clone(),
             previous_known_agent: known_agent,
             previous_state: state,
+            previous_settled_state: self.settled_state,
             previous_presentation: presentation.clone(),
             agent_label,
             known_agent,
@@ -1567,6 +1572,7 @@ impl TerminalState {
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
+        self.settled_state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_state_change_at = None;
         self.launch_argv = None;
@@ -1660,11 +1666,16 @@ impl TerminalState {
             return None;
         }
 
+        let previous_settled_state = self.settled_state;
         self.state = state;
+        if state != AgentState::Unknown {
+            self.settled_state = state;
+        }
         Some(EffectiveStateChange {
             previous_agent_label,
             previous_known_agent,
             previous_state,
+            previous_settled_state,
             previous_presentation,
             agent_label,
             known_agent,

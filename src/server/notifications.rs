@@ -34,14 +34,13 @@ pub(crate) fn toast_message_from_state_change(
         .find_map(|(ws_idx, ws)| {
             ws.tabs.iter().find_map(|tab| {
                 let pane = tab.panes.get(&pane_id)?;
-                let agent_label = state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.effective_agent_label())?;
+                let terminal = state.terminals.get(&pane.attached_terminal_id)?;
+                let agent_label = terminal.effective_agent_label()?;
                 let kind = app::actions::notification_toast_for_state_change_with_agent_labels(
                     suppress_active_tab_notifications,
                     prev_state,
                     new_state,
+                    terminal.settled_state,
                     previous_agent_label,
                     Some(agent_label),
                 )?;

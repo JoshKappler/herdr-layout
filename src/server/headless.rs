@@ -1762,6 +1762,24 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    fn pane_settled_state(&self, pane_id: crate::layout::PaneId) -> crate::detect::AgentState {
+        self.app
+            .state
+            .workspaces
+            .iter()
+            .find_map(|ws| {
+                ws.tabs.iter().find_map(|tab| {
+                    let pane = tab.panes.get(&pane_id)?;
+                    self.app
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .map(|terminal| terminal.settled_state)
+                })
+            })
+            .unwrap_or(crate::detect::AgentState::Unknown)
+    }
+
     fn pane_effective_agent_label(&self, pane_id: crate::layout::PaneId) -> Option<String> {
         self.app.state.workspaces.iter().find_map(|ws| {
             ws.tabs.iter().find_map(|tab| {
@@ -1797,9 +1815,11 @@ impl HeadlessServer {
                     suppress_active_tab_notifications,
                     update.previous_state,
                     update.state,
+                    update.previous_settled_state,
                     update.previous_agent_label.as_deref(),
                     update.agent_label.as_deref(),
                 )
+                .filter(|sound| *sound != crate::sound::Sound::Done)
             {
                 let body = self.sound_position_body(update.pane_id);
                 self.send_notify_to_foreground_client(
@@ -2100,9 +2120,11 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            self.pane_settled_state(pane_id_val),
                             prev_agent_label.as_deref(),
                             next_agent_label.as_deref(),
                         )
+                        .filter(|sound| *sound != crate::sound::Sound::Done)
                     {
                         let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
@@ -2193,9 +2215,11 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            self.pane_settled_state(pane_id_val),
                             prev_agent_label.as_deref(),
                             next_agent_label.as_deref(),
                         )
+                        .filter(|sound| *sound != crate::sound::Sound::Done)
                     {
                         let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
@@ -3284,6 +3308,7 @@ impl HeadlessServer {
                         suppress_active_tab_notifications,
                         *prev_state,
                         new_state,
+                        self.pane_settled_state(*pane_id),
                         prev_agent_label.as_deref(),
                         agent_label.as_deref(),
                     )
@@ -3329,9 +3354,11 @@ impl HeadlessServer {
                         suppress_active_tab_notifications,
                         *prev_state,
                         new_state,
+                        self.pane_settled_state(*pane_id),
                         prev_agent_label.as_deref(),
                         agent_label.as_deref(),
                     )
+                    .filter(|sound| *sound != crate::sound::Sound::Done)
                 {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
                     let body = self.sound_position_body(*pane_id);
