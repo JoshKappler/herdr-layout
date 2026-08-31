@@ -45,14 +45,18 @@ impl PendingIdleConfirmation {
         process_exited: bool,
         now: std::time::Instant,
     ) -> bool {
-        let is_working_to_plain_idle = previous.state == AgentState::Working
+        // A visible prompt box no longer bypasses the hold: Claude 2.1.252
+        // redraws its status block clear-then-rewrite, so a scan landing
+        // mid-rewrite sees the prompt box with no working line and strobed
+        // the dots working/done at the redraw rate (Josh 2026-08-31). Every
+        // working-to-idle reading now takes the confirmation window.
+        let is_working_to_idle = previous.state == AgentState::Working
             && next.state == AgentState::Idle
-            && !next.visible_idle
             && !next.visible_blocker
             && !agent_changed
             && !process_exited;
 
-        if !is_working_to_plain_idle {
+        if !is_working_to_idle {
             self.clear();
             return false;
         }
@@ -487,14 +491,35 @@ mod tests {
     }
 
     #[test]
-    fn visible_idle_bypasses_plain_idle_hold() {
+    fn visible_idle_holds_working_to_idle_until_confirmed() {
         let now = std::time::Instant::now();
         let previous = publish_state(AgentState::Working);
         let mut next = publish_state(AgentState::Idle);
         next.visible_idle = true;
         let mut pending = PendingIdleConfirmation::default();
 
-        assert!(!pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK
+        ));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 2
+        ));
+        assert!(!pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 3
+        ));
     }
 
     #[test]
