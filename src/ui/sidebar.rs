@@ -216,25 +216,20 @@ pub(crate) struct TabDash {
     pub seen: bool,
     /// the turn is over but background shells, agents, or tasks still run
     pub bg_wait: bool,
-    /// live subagents under this tab, from the summarizer's lane header
-    pub subs_live: bool,
     pub rows: Vec<TabDashRow>,
 }
 
 const TAB_LANE_KEYS: [&str; 7] = ["l1", "l2", "l3", "l4", "l5", "l6", "lmore"];
 
-/// The tab status cell, shared by both sidebars. Purple means the turn is
-/// over but background work still runs: fisheye until seen, solid after.
+/// The tab status cell, shared by both sidebars. Purple means the agent still
+/// works with background tasks pending: fisheye until seen, solid after.
 fn tab_status_cell(
     state: AgentState,
     seen: bool,
     bg_wait: bool,
-    subs_live: bool,
     p: &crate::app::state::Palette,
 ) -> (&'static str, Style) {
-    let done_waiting = (matches!(state, AgentState::Working) && bg_wait)
-        || (matches!(state, AgentState::Idle) && subs_live);
-    if done_waiting {
+    if matches!(state, AgentState::Working) && bg_wait {
         let sym = if seen { "⬤" } else { "◉" };
         return (sym, Style::default().fg(p.mauve));
     }
@@ -574,7 +569,6 @@ pub(crate) fn tab_dashboards(
                 state,
                 seen,
                 bg_wait,
-                subs_live: toks.get("hdr").is_some_and(|h| h.contains(" sub")),
                 rows,
             }
         })
@@ -1256,12 +1250,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         } else {
             draw_tab_box_border(buf, bx, bw, top, bottom, Style::default().fg(p.overlay0));
         }
-        let subs_live = tab
-            .metadata_tokens
-            .values()
-            .get("hdr")
-            .is_some_and(|h| h.contains(" sub"));
-        let (icon, icon_style) = tab_status_cell(state, seen, bg_wait, subs_live, p);
+        let (icon, icon_style) = tab_status_cell(state, seen, bg_wait, p);
         buf.set_string(bx + 2, top + 1, icon, icon_style);
     }
 
@@ -1737,13 +1726,8 @@ fn render_workspace_list(
                             buf.set_string(sx, ry, e, Style::default().fg(p.subtext0));
                             sx += display_width(e) as u16 + 1;
                         }
-                        let (icon, icon_style) = tab_status_cell(
-                            dash.state,
-                            dash.seen,
-                            dash.bg_wait,
-                            dash.subs_live,
-                            p,
-                        );
+                        let (icon, icon_style) =
+                            tab_status_cell(dash.state, dash.seen, dash.bg_wait, p);
                         buf.set_string(sx, ry, icon, icon_style);
                     }
                     TabDashRow::TitleCont { text, tint_at } => {
@@ -1859,32 +1843,32 @@ mod tests {
     fn status_cell_blends_done_but_waiting() {
         let p = crate::app::state::AppState::test_new().palette;
 
-        let (sym, style) = tab_status_cell(AgentState::Working, false, true, false, &p);
+        let (sym, style) = tab_status_cell(AgentState::Working, false, true, &p);
         assert_eq!(sym, "◉");
         assert_eq!(style.fg, Some(p.mauve));
         assert_eq!(style.bg, None);
 
-        let (sym, style) = tab_status_cell(AgentState::Working, true, true, false, &p);
+        let (sym, style) = tab_status_cell(AgentState::Working, true, true, &p);
         assert_eq!(sym, "⬤");
         assert_eq!(style.fg, Some(p.mauve));
         assert_eq!(style.bg, None);
 
-        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, true, &p);
-        assert_eq!(sym, "◉");
-        assert_eq!(style.fg, Some(p.mauve));
-        assert_eq!(style.bg, None);
-
-        let (sym, style) = tab_status_cell(AgentState::Idle, true, false, true, &p);
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, true, &p);
         assert_eq!(sym, "⬤");
-        assert_eq!(style.fg, Some(p.mauve));
+        assert_eq!(style.fg, Some(p.teal));
         assert_eq!(style.bg, None);
 
-        let (sym, style) = tab_status_cell(AgentState::Working, false, false, true, &p);
+        let (sym, style) = tab_status_cell(AgentState::Idle, true, true, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.green));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Working, false, false, &p);
         assert_eq!(sym, "⬤");
         assert_eq!(style.fg, Some(p.yellow));
         assert_eq!(style.bg, None);
 
-        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, false, &p);
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, &p);
         assert_eq!(sym, "⬤");
         assert_eq!(style.fg, Some(p.teal));
         assert_eq!(style.bg, None);
