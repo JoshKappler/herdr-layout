@@ -18,6 +18,7 @@ pub(super) struct DetectionPublishState {
     pub(super) visible_idle: bool,
     pub(super) visible_blocker: bool,
     pub(super) visible_working: bool,
+    pub(super) bg_wait: bool,
 }
 
 #[derive(Debug, Default)]
@@ -44,14 +45,18 @@ impl PendingIdleConfirmation {
         process_exited: bool,
         now: std::time::Instant,
     ) -> bool {
-        let is_working_to_plain_idle = previous.state == AgentState::Working
+        // A visible prompt box no longer bypasses the hold: Claude 2.1.252
+        // redraws its status block clear-then-rewrite, so a scan landing
+        // mid-rewrite sees the prompt box with no working line and strobed
+        // the dots working/done at the redraw rate (Josh 2026-08-31). Every
+        // working-to-idle reading now takes the confirmation window.
+        let is_working_to_idle = previous.state == AgentState::Working
             && next.state == AgentState::Idle
-            && !next.visible_idle
             && !next.visible_blocker
             && !agent_changed
             && !process_exited;
 
-        if !is_working_to_plain_idle {
+        if !is_working_to_idle {
             self.clear();
             return false;
         }
@@ -148,6 +153,7 @@ pub(super) fn should_publish_detection_update(
         || next.visible_idle != previous.visible_idle
         || next.visible_blocker != previous.visible_blocker
         || next.visible_working != previous.visible_working
+        || next.bg_wait != previous.bg_wait
         || agent_changed
         || process_exited
         || (stable_visible_signal_refresh_due && next.visible_blocker && previous.visible_blocker)
@@ -218,6 +224,7 @@ pub(super) enum DetectionPublishDecision {
         visible_idle: bool,
         visible_blocker: bool,
         visible_working: bool,
+        bg_wait: bool,
         process_exited: bool,
     },
 }
@@ -225,6 +232,7 @@ pub(super) enum DetectionPublishDecision {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ScreenDetectionPublishInput {
     pub(super) current_state: AgentState,
+    pub(super) last_bg_wait: bool,
     pub(super) last_visible_idle: bool,
     pub(super) last_visible_blocker: bool,
     pub(super) last_visible_working: bool,
@@ -244,18 +252,21 @@ pub(super) fn decide_screen_detection_publish(
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
+    let bg_wait = detection.bg_wait && new_state == AgentState::Working;
 
     let previous_publish = DetectionPublishState {
         state: input.current_state,
         visible_idle: input.last_visible_idle,
         visible_blocker: input.last_visible_blocker,
         visible_working: input.last_visible_working,
+        bg_wait: input.last_bg_wait,
     };
     let next_publish = DetectionPublishState {
         state: new_state,
         visible_idle,
         visible_blocker,
         visible_working,
+        bg_wait,
     };
     let stable_refresh_due = stable_visible_signal_refresh_due(
         previous_publish,
@@ -281,6 +292,7 @@ pub(super) fn decide_screen_detection_publish(
             visible_idle,
             visible_blocker,
             visible_working,
+            bg_wait,
             process_exited: input.process_exited,
         },
     }
@@ -306,6 +318,7 @@ pub(super) fn detection_update_for_publish_with_osc(
         return Some(crate::detect::AgentDetection {
             state: AgentState::Idle,
             skip_state_update: false,
+            bg_wait: false,
             visible_idle: true,
             visible_blocker: false,
             visible_working: false,
@@ -336,7 +349,25 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
         }
+    }
+
+    #[test]
+    fn bg_wait_flip_alone_publishes() {
+        let prev = DetectionPublishState {
+            state: AgentState::Working,
+            visible_idle: false,
+            visible_blocker: false,
+            visible_working: true,
+            bg_wait: false,
+        };
+        let next = DetectionPublishState {
+            bg_wait: true,
+            ..prev
+        };
+        assert!(should_publish_detection_update(prev, next, false, false, false));
+        assert!(!should_publish_detection_update(prev, prev, false, false, false));
     }
 
     fn screen_detection(state: AgentState) -> AgentDetection {
@@ -346,6 +377,7 @@ mod tests {
             visible_idle: state == AgentState::Idle,
             visible_blocker: false,
             visible_working: state == AgentState::Working,
+            bg_wait: false,
         }
     }
 
@@ -356,6 +388,7 @@ mod tests {
     ) -> ScreenDetectionPublishInput {
         ScreenDetectionPublishInput {
             current_state,
+            last_bg_wait: false,
             last_visible_idle: false,
             last_visible_blocker: false,
             last_visible_working: false,
@@ -458,14 +491,35 @@ mod tests {
     }
 
     #[test]
-    fn visible_idle_bypasses_plain_idle_hold() {
+    fn visible_idle_holds_working_to_idle_until_confirmed() {
         let now = std::time::Instant::now();
         let previous = publish_state(AgentState::Working);
         let mut next = publish_state(AgentState::Idle);
         next.visible_idle = true;
         let mut pending = PendingIdleConfirmation::default();
 
-        assert!(!pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK
+        ));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 2
+        ));
+        assert!(!pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 3
+        ));
     }
 
     #[test]
@@ -506,6 +560,7 @@ mod tests {
                 visible_idle: false,
                 visible_blocker: false,
                 visible_working: true,
+                bg_wait: false,
                 process_exited: false,
             }
         );
@@ -526,6 +581,7 @@ mod tests {
                 visible_idle: true,
                 visible_blocker: false,
                 visible_working: false,
+                bg_wait: false,
                 process_exited: false,
             }
         );

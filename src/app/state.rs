@@ -194,7 +194,7 @@ impl Palette {
             overlay1: Color::White,
             text: Color::Reset,
             subtext0: Color::Gray,
-            mauve: Color::Gray,
+            mauve: Color::Magenta,
             green: Color::Green,
             yellow: Color::Yellow,
             red: Color::LightRed,
@@ -1371,6 +1371,9 @@ pub struct PendingAgentNotification {
     pub kind: ToastKind,
     pub state: AgentState,
     pub deadline: std::time::Instant,
+    pub toast_delivered: bool,
+    /// The done morse waits out its own settle window past `deadline`.
+    pub sound_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1483,6 +1486,16 @@ pub struct AppState {
     pub detail_panel: Option<crate::app::detail_panel::DetailPanelCache>,
     /// subagent lane paths expanded in the detail panel's board
     pub detail_panel_expanded: std::collections::HashSet<String>,
+    /// exchange uuid the prompt viewer is pinned to; None cycles
+    pub detail_panel_pinned: Option<String>,
+    /// last confirmed claude session for the focused terminal; bridges the
+    /// gaps while hook authority lapses so the btw button holds steady
+    pub btw_session_latch: Option<(crate::terminal::TerminalId, String)>,
+    pub detail_panel_cycle: usize,
+    pub detail_panel_cycle_at: Option<std::time::Instant>,
+    /// prompt viewer body scroll; resets when the shown exchange changes
+    pub detail_panel_viewer_scroll: usize,
+    pub detail_panel_viewer_shown: Option<String>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1861,6 +1874,12 @@ impl AppState {
             detail_panel_scroll: 0,
             detail_panel: None,
             detail_panel_expanded: std::collections::HashSet::new(),
+            detail_panel_pinned: None,
+            btw_session_latch: None,
+            detail_panel_cycle: 0,
+            detail_panel_cycle_at: None,
+            detail_panel_viewer_scroll: 0,
+            detail_panel_viewer_shown: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

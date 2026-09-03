@@ -285,6 +285,17 @@ impl App {
             return;
         }
 
+        // A press on the btw fork button owns the whole gesture: the release
+        // and any drags in between never reach the pane underneath.
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) if self.btw_button_pressed => return,
+            MouseEventKind::Up(MouseButton::Left) if self.btw_button_pressed => {
+                self.btw_button_pressed = false;
+                return;
+            }
+            _ => {}
+        }
+
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
@@ -303,6 +314,7 @@ impl App {
             if !right_button
                 && intentional_pane_press
                 && matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+                && !self.state.on_btw_fork_button(mouse.column, mouse.row)
             {
                 if let (Some(ws_idx), Some(info)) = (
                     self.state.active,
@@ -343,6 +355,7 @@ impl App {
                         self.state.detail_panel_scroll = 0;
                         if !self.state.detail_panel_open {
                             self.state.detail_panel = None;
+                            self.state.detail_panel_pinned = None;
                         }
                     }
                     MouseAction::Settings(action) => match action {
@@ -391,6 +404,14 @@ impl App {
                     } => self.move_sidebar_tab_via_api(source_ws_idx, source_tab_idx, target_ws_idx),
                     MouseAction::SetSplitRatio { path, ratio } => {
                         self.set_split_ratio_via_api(path, ratio)
+                    }
+                    MouseAction::BtwFork {
+                        ws_idx,
+                        pane_id,
+                        session_id,
+                    } => {
+                        self.btw_button_pressed = true;
+                        self.btw_fork_pane(ws_idx, pane_id, &session_id);
                     }
                     MouseAction::RenameModal(action) => {
                         self.apply_rename_mouse_action_via_api(action)
@@ -579,6 +600,11 @@ impl App {
         }
 
         if self.state.mode != Mode::Terminal {
+            self.last_pane_click = None;
+            return None;
+        }
+
+        if self.state.on_btw_fork_button(mouse.column, mouse.row) {
             self.last_pane_click = None;
             return None;
         }

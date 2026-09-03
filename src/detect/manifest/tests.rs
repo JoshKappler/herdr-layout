@@ -590,6 +590,63 @@ contains = ["active"]
     assert!(parse_manifest(manifest).is_err());
 }
 
+#[test]
+fn last_turn_above_prompt_box_starts_after_the_last_prompt_echo() {
+    let content = "old awaiting approval\n❯ first ask\nmiddle\n  ❯ second ask\nnew done\n────────────\n❯\n────────────\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: content,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "last_turn_above_prompt_box"
+        ),
+        "new done\n"
+    );
+}
+
+#[test]
+fn last_turn_above_prompt_box_without_an_echo_is_the_whole_slice() {
+    // the prompt box's own ❯ sits below the top border, so it is not an echo
+    let content = "old awaiting approval\nnew done\n────────────\n❯ typed text\n────────────\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: content,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "last_turn_above_prompt_box"
+        ),
+        "old awaiting approval\nnew done\n"
+    );
+}
+
+#[test]
+fn last_turn_above_prompt_box_requires_engine_four_when_declared() {
+    let manifest = |min_engine_version: u32| {
+        format!(
+            r#"
+id = "claude"
+version = "1"
+min_engine_version = {min_engine_version}
+
+[[rules]]
+id = "handoff"
+state = "blocked"
+region = " last_turn_above_prompt_box "
+contains = ["ready to merge"]
+"#
+        )
+    };
+
+    assert!(parse_manifest(&manifest(3)).is_err());
+    assert!(parse_manifest(&manifest(4)).is_ok());
+}
+
 // ---------------------------------------------------------------------------
 // OSC rule tests — exercise the new osc_title / osc_progress regions against
 // the bundled Claude and Codex manifests.
@@ -700,6 +757,295 @@ fn claude_blocker_screen_outranks_osc_working_title() {
 }
 
 #[test]
+fn claude_activity_line_is_working_even_with_no_title() {
+    // captured from a real working pane on 2026-08-27; the ✳ frame glyph is
+    // the fork's addition to the live_turn_working set
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens · thought for 12s)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+// The teal-then-yellow flap of 2026-08-27: an unfocused claude 2.1.248 pauses
+// its title-frame animation, the stale spinner title expires mid-turn, and
+// these real working frames were the ones the screen ruleset missed.
+
+#[test]
+fn claude_api_retry_banner_is_working() {
+    let screen = "\u{273B} Waiting for API response · will retry in 8s · check your network\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+    assert!(!result.bg_wait);
+}
+
+#[test]
+fn claude_lower_priority_retry_banner_is_working() {
+    let screen = "\u{273B} Working at lower priority · waiting for capacity · next try in 4m · attempt 2 · esc to interrupt\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_narrow_pane_thinking_clause_is_working() {
+    // a narrow pane drops the elapsed clock, so the paren group opens with
+    // the thinking clause instead of a digit
+    let screen = "\u{2733} Deliberating\u{2026} (still thinking)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_working);
+}
+
+// The yellow-instead-of-purple state of 2026-08-27: the turn is over, only
+// subagents still run, and the half-moon title keeps animating, so it never
+// goes stale and outranked every background_wait screen rule.
+
+#[test]
+fn claude_agent_rows_after_turn_outrank_spinning_title_as_background_wait() {
+    // probe capture from pane w4N:p3; the agent list is the only evidence
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏺ main\n\
+        ◯ general-purpose  Checking pane suite failures   32m 15s · ↓ 241.9k tokens\n\
+        ⏵⏵ bypass permissions on · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ Herdr sidebar status indicator", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_background_shell_bar_outranks_spinning_title() {
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ gt video demo", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_live_turn_outranks_background_rows_and_title() {
+    // mid-turn stays plain yellow even with agent rows, a shell count, and a
+    // spinning title all present
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏺ main\n\
+        ◯ general-purpose  Checking pane suite failures   2m 3s · ↓ 4.1k tokens\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "◐ gt video demo", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_prompt_box_without_turn_chrome_stays_idle_after_stale_title() {
+    // guard: with the spinner row gone and the title expired, a finished
+    // turn must still read idle, or the yellow pin comes back
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.visible_idle);
+}
+
+#[test]
+fn claude_background_shell_bar_is_a_background_wait() {
+    // the ⏸⏵ status row keeps counting shells after the turn ends
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 31% · earlier prompt\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait);
+}
+
+#[test]
+fn claude_background_monitor_bar_is_a_background_wait() {
+    // captured live from an idle pane on 2026-08-27
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 37% · earlier prompt\n\
+        ⏵⏵ bypass permissions on · 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(result.bg_wait);
+}
+
+#[test]
+fn claude_mixed_background_count_list_is_a_background_wait() {
+    // captured live on 2026-08-28: 2.1.x renders mixed background kinds as a
+    // comma list, which the single-count pattern missed and the pane went green
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 2 shells, 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_three_kind_background_count_list_is_a_background_wait() {
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell, 2 monitors, 1 task · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_background_task_bar_is_a_background_wait() {
+    // single-kind regression for the comma-list change; shells and monitors
+    // are pinned by the two tests above this block
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 3 tasks · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_zero_count_in_background_list_stays_idle() {
+    // near-miss: a zero count is not a live background process
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 0 shells, 2 monitors · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_background_count_list_without_status_lead_stays_idle() {
+    // near-miss: the count list only counts when the ⏸⏵ status row leads the line
+    let screen = "────────────\n\
+        ❯\n\
+        ────────────\n\
+        bypass permissions on · 2 shells, 1 monitor · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.bg_wait, "matched: {:?}", result.matched_rule);
+}
+
+#[test]
+fn claude_live_turn_is_not_a_background_wait() {
+    let screen = "\u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        ⏵⏵ bypass permissions on · 1 shell · ← for agents\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Working);
+    assert!(!result.bg_wait);
+}
+
+#[test]
+fn claude_blocker_outranks_activity_line() {
+    let screen = "\u{2733} Simmering\u{2026} (esc to interrupt)\n\
+        do you want to proceed?\n\
+        bash command: rm -rf /tmp/test\n\
+        ❯ 1. Yes\n   2. No\n\
+        Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(result.state, AgentState::Blocked);
+}
+
+#[test]
 fn claude_empty_osc_empty_screen_is_idle_fallback() {
     // No OSC data, no matching screen rule → fallback idle (unchanged V3 behavior)
     let result = osc_explain(Agent::Claude, "", "", "");
@@ -709,6 +1055,319 @@ fn claude_empty_osc_empty_screen_is_idle_fallback() {
         Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
     );
     assert!(!result.visible_idle);
+}
+
+// --- Claude handoff needs-you rule ---
+// a finished turn that declares merge or approval readiness must read
+// Blocked (red dot + siren) instead of the casual done (Josh 2026-08-27)
+
+#[test]
+fn claude_merge_ready_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "Local: lint, typecheck, vitest 42 passed on 4a91c2e.\n\
+        The branch is pushed and the PR is ready to merge.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_approval_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "CI is green, both bot findings are closed, and the PR is awaiting your approval.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_gated_merge_click_handoff_is_blocked() {
+    let screen = "Everything is green; the branch is awaiting your merge click.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_sign_off_handoff_above_idle_prompt_box_is_blocked() {
+    let screen = "The stack is repacked and ready for your sign-off.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_needs_you_marker_line_is_blocked() {
+    let screen = "NEEDS YOU: the release PR has human review as the last gate.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_old_turn_handoff_text_behind_a_new_prompt_echo_is_idle() {
+    // the readiness phrases sit in an earlier turn; the turn after the ❯ echo
+    // needs nobody (live pane w40:p3, 2026-09-03)
+    let screen = "  security fixes awaiting approval. The ledger calls them green...\n\
+        brand asset with no in-app home, awaiting approval since 8/24\n\
+        \n\
+        ✻ Sautéed for 11m 18s · done 12:02 PM\n\
+        \n\
+        ❯ ok, close the ones you said\n\
+        \n\
+        ⏺ Done. All 18 closed 12:06 to 12:07 PDT 2026-09-03, no comments posted, branches kept on origin.\n\
+        \n\
+        ✻ Sautéed for 1m 29s · done 12:07 PM\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5.1 · 22% · ok, close the ones you said\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_handoff_text_in_the_turn_after_a_prompt_echo_is_blocked() {
+    let screen = "  security fixes awaiting approval. The ledger calls them green...\n\
+        \n\
+        ✻ Sautéed for 11m 18s · done 12:02 PM\n\
+        \n\
+        ❯ ok, close the ones you said\n\
+        \n\
+        ⏺ Done. All 18 closed and the PR is ready to merge.\n\
+        \n\
+        ✻ Sautéed for 1m 29s · done 12:07 PM\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5.1 · 22% · ok, close the ones you said\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_ready_text_during_live_turn_stays_working() {
+    // the spinner row outranks the handoff rule, so mid-turn text about
+    // readiness never fires the siren
+    let screen = "The PR is ready to merge.\n\
+        \u{2733} Choreographing\u{2026} (1m 41s · ↓ 5.2k tokens · thought for 12s)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Working,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_turn_working")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_ready_text_with_esc_to_interrupt_frame_is_not_blocked() {
+    // this spinner frame matches no working rule, so the handoff rule's own
+    // not gate is what keeps the siren quiet
+    let screen = "The PR is ready to merge.\n\
+        \u{2733} Simmering\u{2026} (esc to interrupt)\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_ordinary_done_message_stays_idle() {
+    // mentions merge and approval as plain words; a naive contains rule
+    // would wrongly fire here
+    let screen = "Renamed the merge helper, tightened the approval flow docs, and pushed.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(result.visible_idle);
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_merge_click_status_report_stays_idle() {
+    // a status report is not a readiness declaration (Josh 2026-08-27)
+    let screen =
+        "What's left after this round: the reviewer's re-approval and your merge click.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_approval_process_explanation_stays_idle() {
+    let screen =
+        "The review pipeline here: the bot reads the diff first, then a human reviews the merge.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_phrase_typed_in_prompt_box_stays_idle() {
+    // above_prompt_box excludes the box body, so typed text cannot trigger
+    // the handoff rule
+    let screen = "Renamed the helper and pushed.\n\
+        ────────────\n\
+        ❯ say ready to merge when the checks finish\n\
+        ────────────\n\
+        Fable 5 · 20% · if you are confident\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_lowercase_needs_you_prose_stays_idle() {
+    // the opt-in marker is caps only and line anchored
+    let screen = "This branch still needs you to set the sandbox key before tests run.\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert!(!result.visible_blocker);
 }
 
 // --- Codex OSC rules ---

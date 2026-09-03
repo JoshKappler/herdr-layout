@@ -43,7 +43,8 @@ use crate::ipc::{
     SocketFileIdentity,
 };
 use crate::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
+    self, AttachScrollDirection, AttachScrollSource, CellData, FrameData, ServerMessage,
+    MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
 #[cfg(unix)]
@@ -183,6 +184,27 @@ fn apply_terminal_dirty_patch(
         frame.cells[start..end].clone_from_slice(&row_cells);
     }
     true
+}
+
+fn frame_rect_cells(frame: &FrameData, rect: Rect) -> Option<Vec<CellData>> {
+    if rect.width == 0 || rect.height == 0 || !rect_fits_frame(rect, frame) {
+        return None;
+    }
+    let width = usize::from(frame.width);
+    let mut cells = Vec::with_capacity(usize::from(rect.width) * usize::from(rect.height));
+    for y in rect.y..rect.y + rect.height {
+        let start = usize::from(y) * width + usize::from(rect.x);
+        cells.extend_from_slice(&frame.cells[start..start + usize::from(rect.width)]);
+    }
+    Some(cells)
+}
+
+fn restore_frame_rect_cells(frame: &mut FrameData, rect: Rect, cells: &[CellData]) {
+    let width = usize::from(frame.width);
+    for (row, row_cells) in cells.chunks(usize::from(rect.width)).enumerate() {
+        let start = (usize::from(rect.y) + row) * width + usize::from(rect.x);
+        frame.cells[start..start + row_cells.len()].clone_from_slice(row_cells);
+    }
 }
 
 fn dirty_patch_intersects_hyperlinks(
@@ -1740,6 +1762,24 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    fn pane_settled_state(&self, pane_id: crate::layout::PaneId) -> crate::detect::AgentState {
+        self.app
+            .state
+            .workspaces
+            .iter()
+            .find_map(|ws| {
+                ws.tabs.iter().find_map(|tab| {
+                    let pane = tab.panes.get(&pane_id)?;
+                    self.app
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .map(|terminal| terminal.settled_state)
+                })
+            })
+            .unwrap_or(crate::detect::AgentState::Unknown)
+    }
+
     fn pane_effective_agent_label(&self, pane_id: crate::layout::PaneId) -> Option<String> {
         self.app.state.workspaces.iter().find_map(|ws| {
             ws.tabs.iter().find_map(|tab| {
@@ -1775,14 +1815,17 @@ impl HeadlessServer {
                     suppress_active_tab_notifications,
                     update.previous_state,
                     update.state,
+                    update.previous_settled_state,
                     update.previous_agent_label.as_deref(),
                     update.agent_label.as_deref(),
                 )
+                .filter(|sound| *sound != crate::sound::Sound::Done)
             {
+                let body = self.sound_position_body(update.pane_id);
                 self.send_notify_to_foreground_client(
                     protocol::NotifyKind::Sound,
                     sound_notify_message(sound),
-                    None,
+                    body,
                 );
             }
         }
@@ -1828,10 +1871,11 @@ impl HeadlessServer {
         delivery: &crate::app::state::AgentNotificationDelivery,
     ) {
         if let Some(sound) = delivery.sound {
+            let body = self.sound_position_body(delivery.pane_id);
             self.send_notify_to_foreground_client(
                 protocol::NotifyKind::Sound,
                 sound_notify_message(sound),
-                None,
+                body,
             );
         }
 
@@ -1845,6 +1889,19 @@ impl HeadlessServer {
                 );
             }
         }
+    }
+
+    /// Encoded sidebar position ("space.tab") of the pane behind a sound
+    /// notification, carried in the notify body so the client can append the
+    /// morse position suffix. None when the pane has no visible sidebar row.
+    fn sound_position_body(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        let app = &self.app.state;
+        let ws_idx = app
+            .workspaces
+            .iter()
+            .position(|ws| ws.find_tab_index_for_pane(pane_id).is_some())?;
+        crate::ui::sidebar_morse_position(app, ws_idx, pane_id)
+            .map(crate::sound::SidebarPosition::encode)
     }
 
     fn send_notify_to_foreground_client(
@@ -2063,14 +2120,17 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            self.pane_settled_state(pane_id_val),
                             prev_agent_label.as_deref(),
                             next_agent_label.as_deref(),
                         )
+                        .filter(|sound| *sound != crate::sound::Sound::Done)
                     {
+                        let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
-                            None,
+                            body,
                         );
                     }
                 }
@@ -2155,14 +2215,17 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            self.pane_settled_state(pane_id_val),
                             prev_agent_label.as_deref(),
                             next_agent_label.as_deref(),
                         )
+                        .filter(|sound| *sound != crate::sound::Sound::Done)
                     {
+                        let body = self.sound_position_body(pane_id_val);
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
-                            None,
+                            body,
                         );
                     }
                 }
@@ -3245,6 +3308,7 @@ impl HeadlessServer {
                         suppress_active_tab_notifications,
                         *prev_state,
                         new_state,
+                        self.pane_settled_state(*pane_id),
                         prev_agent_label.as_deref(),
                         agent_label.as_deref(),
                     )
@@ -3290,15 +3354,18 @@ impl HeadlessServer {
                         suppress_active_tab_notifications,
                         *prev_state,
                         new_state,
+                        self.pane_settled_state(*pane_id),
                         prev_agent_label.as_deref(),
                         agent_label.as_deref(),
                     )
+                    .filter(|sound| *sound != crate::sound::Sound::Done)
                 {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
+                    let body = self.sound_position_body(*pane_id);
                     self.send_notify_to_foreground_client(
                         protocol::NotifyKind::Sound,
                         sound_notify_message(sound),
-                        None,
+                        body,
                     );
                 }
             }
@@ -3423,6 +3490,11 @@ impl HeadlessServer {
             retained_fallback!("no_pane_info");
         }
 
+        // The btw button floats over pane content, so pane patches must not
+        // paint through it; its cells are put back after the patch loop.
+        let btw_rect = self.app.state.btw_fork_button_rect();
+        let btw_cells = frame_rect_cells(&frame, btw_rect);
+
         let mut touched = false;
         for info in pane_infos {
             if !rect_fits_frame(info.inner_rect, &frame) {
@@ -3453,6 +3525,12 @@ impl HeadlessServer {
                     }
                     touched = true;
                 }
+            }
+        }
+
+        if touched {
+            if let Some(cells) = &btw_cells {
+                restore_frame_rect_cells(&mut frame, btw_rect, cells);
             }
         }
 
@@ -6069,6 +6147,56 @@ next_tab = ""
     }
 
     #[test]
+    fn virtual_render_keeps_btw_button_through_hook_authority_lapse() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("btw-latch");
+        let pane_id = ws.tabs[0].root_pane;
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).cloned().unwrap();
+        {
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.hook_authority = Some(crate::terminal::state::HookAuthority {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                reported_at: std::time::Instant::now(),
+                session_ref: Some(
+                    crate::agent_resume::AgentSessionRef::id("latch-session").unwrap(),
+                ),
+            });
+        }
+
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        let visible = state.btw_fork_button_rect();
+        assert_ne!(
+            visible,
+            Rect::default(),
+            "button shows for a live claude session"
+        );
+
+        // authority lapses for a frame while output streams; detection blanks too
+        {
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.hook_authority = None;
+            terminal.persisted_agent_session = None;
+            terminal.detected_agent = None;
+        }
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        assert_eq!(
+            state.btw_fork_button_rect(),
+            visible,
+            "an authority lapse on the live render path must not blink the button"
+        );
+    }
+
+    #[test]
     fn virtual_render_without_frame_cursor_keeps_cursor_hidden() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
@@ -7865,6 +7993,74 @@ next_tab = ""
         assert_eq!((patched.width, patched.height), (80, 24));
     }
 
+    fn frame_cells_text(frame: &FrameData, x: u16, y: u16, len: u16) -> String {
+        let start = usize::from(y) * usize::from(frame.width) + usize::from(x);
+        frame.cells[start..start + usize::from(len)]
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_keeps_btw_button_over_patched_pane_rows() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        {
+            let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.hook_authority = Some(crate::terminal::state::HookAuthority {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                state: crate::detect::AgentState::Working,
+                message: None,
+                reported_at: std::time::Instant::now(),
+                session_ref: Some(
+                    crate::agent_resume::AgentSessionRef::id("retained-session").unwrap(),
+                ),
+            });
+        }
+
+        server.render_and_stream();
+        let first = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
+        let rect = server.app.state.btw_fork_button_rect();
+        assert_ne!(rect, Rect::default(), "button shows for a live claude session");
+        assert_eq!(
+            frame_cells_text(&first, rect.x + 2, rect.y + 1, 3),
+            "btw",
+            "full render draws the button"
+        );
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let mut streamed = Vec::from(&b"\x1b[1;1H"[..]);
+        streamed.extend(std::iter::repeat(b'X').take(400));
+        runtime.test_process_pty_bytes(&streamed);
+
+        assert!(server.render_retained_pty_update_and_stream());
+        let patched = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("retained frame"),
+        );
+        assert!(patched.cells.iter().any(|cell| cell.symbol == "X"));
+        assert_eq!(
+            frame_cells_text(&patched, rect.x + 2, rect.y + 1, 3),
+            "btw",
+            "a retained pane patch must not paint over the btw button"
+        );
+    }
+
     #[tokio::test]
     async fn retained_pty_update_declines_while_popup_is_visible() {
         let (mut server, client_rx, _) = retained_test_server(b"tiled");
@@ -9228,6 +9424,7 @@ next_tab = ""
             state: crate::detect::AgentState::Blocked,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             process_exited: false,
             observed_at: Instant::now(),
         });
@@ -9317,6 +9514,7 @@ next_tab = ""
                 state: crate::detect::AgentState::Blocked,
                 visible_blocker: false,
                 visible_working: false,
+                bg_wait: false,
                 process_exited: false,
                 observed_at: Instant::now(),
             })

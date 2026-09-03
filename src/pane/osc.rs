@@ -427,6 +427,7 @@ pub(super) struct AgentOscStateTracker {
     body: Vec<u8>,
     latest_title: Option<String>,
     latest_title_at: Option<std::time::Instant>,
+    prev_set_title: Option<String>,
     terminal_title: Option<String>,
     latest_progress: Option<String>,
 }
@@ -487,8 +488,18 @@ impl AgentOscStateTracker {
                         let title = sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS);
                         (!title.is_empty()).then_some(title)
                     };
+                    // an unchanged re-emission is not fresh evidence: Claude
+                    // re-sends a frozen spinner title on a timer, and only a
+                    // title that actually changes proves the spinner animates
+                    if title.is_some() {
+                        if title != self.prev_set_title {
+                            self.latest_title_at = Some(std::time::Instant::now());
+                        }
+                        self.prev_set_title.clone_from(&title);
+                    } else {
+                        self.latest_title_at = None;
+                    }
                     self.latest_title.clone_from(&title);
-                    self.latest_title_at = title.is_some().then(std::time::Instant::now);
                     self.terminal_title = title;
                 }
                 b"9" => {
@@ -517,10 +528,10 @@ impl AgentOscStateTracker {
     #[allow(dead_code)] // used by terminal.rs; full call chain wired in Stage C
     pub(super) fn latest_title(&self) -> &str {
         let title = self.latest_title.as_deref().unwrap_or("");
-        let spinner = title
-            .chars()
-            .next()
-            .is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+        // braille = claude <= 2.1.227, half-circles ◐◑◒◓ = 2.1.228+
+        let spinner = title.chars().next().is_some_and(|c| {
+            ('\u{2800}'..='\u{28FF}').contains(&c) || ('\u{25D0}'..='\u{25D3}').contains(&c)
+        });
         if spinner
             && self
                 .latest_title_at
@@ -549,6 +560,7 @@ impl AgentOscStateTracker {
     pub(super) fn clear_retained(&mut self) {
         self.latest_title = None;
         self.latest_title_at = None;
+        self.prev_set_title = None;
         self.latest_progress = None;
     }
 }
@@ -1080,6 +1092,29 @@ mod tests {
         assert_eq!(t.latest_title(), "\u{2733} done with the task");
         t.backdate_latest_title(SPINNER_TITLE_STALE_AFTER + std::time::Duration::from_secs(5));
         assert_eq!(t.latest_title(), "\u{2733} done with the task");
+    }
+
+    // The live failure of 2026-08-27: an idle claude re-sends its frozen
+    // half-circle title every ~2s, so staleness keyed on emission time
+    // flapped working/done. Only a changed title may reset the clock.
+    #[test]
+    fn reemitted_identical_spinner_title_stays_stale() {
+        let mut t = AgentOscStateTracker::default();
+        t.observe("\x1b]0;\u{25D0} gt video demo\x07".as_bytes());
+        assert_eq!(t.latest_title(), "\u{25D0} gt video demo");
+
+        t.backdate_latest_title(SPINNER_TITLE_STALE_AFTER + std::time::Duration::from_secs(5));
+        assert_eq!(t.latest_title(), "");
+
+        t.observe("\x1b]0;\u{25D0} gt video demo\x07".as_bytes());
+        assert_eq!(t.latest_title(), "");
+
+        t.observe("\x1b]0;\x07".as_bytes());
+        t.observe("\x1b]0;\u{25D0} gt video demo\x07".as_bytes());
+        assert_eq!(t.latest_title(), "");
+
+        t.observe("\x1b]0;\u{25D1} gt video demo\x07".as_bytes());
+        assert_eq!(t.latest_title(), "\u{25D1} gt video demo");
     }
 
     #[test]

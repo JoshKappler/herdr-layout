@@ -534,14 +534,15 @@ impl App {
                 },
             );
             if moved_tab_id.is_none() {
-                moved_tab_id = serde_json::from_str::<serde_json::Value>(&response)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .pointer("/result/created_tab/tab_id")
-                            .and_then(|id| id.as_str())
-                            .map(str::to_string)
-                    });
+                moved_tab_id =
+                    serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
+                        .ok()
+                        .and_then(|response| match response.result {
+                            crate::api::schema::ResponseResult::PaneMove { move_result } => {
+                                move_result.created_tab.map(|tab| tab.tab_id)
+                            }
+                            _ => None,
+                        });
                 if moved_tab_id.is_none() {
                     return;
                 }

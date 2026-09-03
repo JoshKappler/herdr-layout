@@ -63,6 +63,7 @@ pub enum AppEvent {
         state: AgentState,
         visible_blocker: bool,
         visible_working: bool,
+        bg_wait: bool,
         process_exited: bool,
         observed_at: Instant,
     },

@@ -214,26 +214,45 @@ pub(crate) struct TabDash {
     pub tab_idx: usize,
     pub state: AgentState,
     pub seen: bool,
-    /// live subagents under this tab: the dot gets a blue ring while the
-    /// parent works so a subagent wait is visible (Josh 2026-08-27)
-    pub subs_live: bool,
+    /// the turn is over but background shells, agents, or tasks still run
+    pub bg_wait: bool,
     pub rows: Vec<TabDashRow>,
 }
 
 const TAB_LANE_KEYS: [&str; 7] = ["l1", "l2", "l3", "l4", "l5", "l6", "lmore"];
 
+/// The tab status cell, shared by both sidebars. Purple means the agent still
+/// works with background tasks pending: fisheye until seen, solid after.
+fn tab_status_cell(
+    state: AgentState,
+    seen: bool,
+    bg_wait: bool,
+    p: &crate::app::state::Palette,
+) -> (&'static str, Style) {
+    if matches!(state, AgentState::Working) && bg_wait {
+        let sym = if seen { "⬤" } else { "◉" };
+        return (sym, Style::default().fg(p.mauve));
+    }
+    state_dot(state, seen, p)
+}
+
 fn tab_attention(
     app: &AppState,
     tab: &crate::workspace::Tab,
-) -> (AgentState, bool, Option<u64>) {
+) -> (AgentState, bool, Option<u64>, bool) {
     tab.panes
         .values()
         .filter_map(|pane| {
             let terminal = app.terminals.get(&pane.attached_terminal_id)?;
-            Some((terminal.state, pane.seen, terminal.last_agent_state_change_at))
+            Some((
+                terminal.state,
+                pane.seen,
+                terminal.last_agent_state_change_at,
+                terminal.bg_wait,
+            ))
         })
-        .max_by_key(|(state, seen, _)| workspace_attention_priority(*state, *seen))
-        .unwrap_or((AgentState::Unknown, true, None))
+        .max_by_key(|(state, seen, _, _)| workspace_attention_priority(*state, *seen))
+        .unwrap_or((AgentState::Unknown, true, None, false))
 }
 
 fn fmt_elapsed(since_ms: u64) -> String {
@@ -378,6 +397,47 @@ fn phase_tint(state: AgentState, seen: bool, p: &Palette) -> Style {
     Style::default().fg(color)
 }
 
+/// True when wrapping carried `text` through to its final byte, so nothing
+/// was tail-elided away.
+fn wrap_keeps_tail(text: &str, lines: &[WrappedLine]) -> bool {
+    lines
+        .last()
+        .is_some_and(|last| text.get(last.start..) == Some(last.text.as_str()))
+}
+
+/// Wrap "title, phase" into the tab box rows. The phase clause is the part
+/// the reader scans first, so when the rows cannot hold everything the title
+/// is elided mid-sentence rather than letting tail truncation eat the phase.
+fn layout_tab_title(
+    title: &str,
+    phase: &str,
+    first: usize,
+    rest: usize,
+) -> (Option<usize>, Vec<WrappedLine>) {
+    if phase.is_empty() {
+        return (None, wrap_prose(title, first, rest, TAB_TITLE_MAX_LINES));
+    }
+    let full = format!("{title}, {phase}");
+    let lines = wrap_prose(&full, first, rest, TAB_TITLE_MAX_LINES);
+    if wrap_keeps_tail(&full, &lines) {
+        return (Some(full.len() - phase.len()), lines);
+    }
+    let cuts: Vec<usize> = title
+        .char_indices()
+        .filter_map(|(i, ch)| (ch == ' ').then_some(i))
+        .collect();
+    for cut in cuts.into_iter().rev() {
+        let candidate = format!("{}…, {phase}", title[..cut].trim_end());
+        let lines = wrap_prose(&candidate, first, rest, TAB_TITLE_MAX_LINES);
+        if wrap_keeps_tail(&candidate, &lines) {
+            return (Some(candidate.len() - phase.len()), lines);
+        }
+    }
+    let bare = format!("…, {phase}");
+    let lines = wrap_prose(&bare, first, rest, TAB_TITLE_MAX_LINES);
+    (Some(bare.len() - phase.len()), lines)
+}
+
 fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> {
     let ts = tint_start?;
     let at = ts.saturating_sub(line.start).min(line.text.len());
@@ -387,9 +447,7 @@ fn line_tint_at(line: &WrappedLine, tint_start: Option<usize>) -> Option<usize> 
     Some(at)
 }
 
-/// Thin line box normally; a highlighted box renders as a solid slab
-/// instead (the fill is painted, no outline drawn), so the highlight is one
-/// clean rectangle with nothing to misalign (Josh 2026-08-27).
+/// Thin line box for plain tabs.
 fn draw_tab_box_border(
     buf: &mut ratatui::buffer::Buffer,
     bx: u16,
@@ -397,11 +455,7 @@ fn draw_tab_box_border(
     top: u16,
     bottom: u16,
     border: Style,
-    filled: bool,
 ) {
-    if filled {
-        return;
-    }
     for x in bx..bx + bw {
         buf[(x, top)].set_symbol("─");
         buf[(x, top)].set_style(border);
@@ -413,10 +467,43 @@ fn draw_tab_box_border(
     buf[(bx, bottom)].set_symbol("└");
     buf[(bx + bw - 1, bottom)].set_symbol("┘");
     for by in top + 1..bottom {
-        for x in [bx, bx + bw - 1] {
-            buf[(x, by)].set_symbol("│");
-            buf[(x, by)].set_style(border);
-        }
+        buf[(bx, by)].set_symbol("│");
+        buf[(bx, by)].set_style(border);
+        buf[(bx + bw - 1, by)].set_symbol("│");
+        buf[(bx + bw - 1, by)].set_style(border);
+    }
+}
+
+/// Highlighted tab box: a half-block band in the rail's color whose inner
+/// edge sits mid-cell where the thin line would, so it thickens outward.
+/// The rail column at bx - 1 becomes the left side, junction glyphs merging
+/// band and rail so the box sprouts from it (Josh 2026-08-27).
+fn draw_tab_box_sprout(
+    buf: &mut ratatui::buffer::Buffer,
+    bx: u16,
+    bw: u16,
+    top: u16,
+    bottom: u16,
+    rail: Style,
+) {
+    let right = bx + bw - 1;
+    for x in bx..right {
+        buf[(x, top)].set_symbol("▀");
+        buf[(x, top)].set_style(rail);
+        buf[(x, bottom)].set_symbol("▄");
+        buf[(x, bottom)].set_style(rail);
+    }
+    buf[(bx - 1, top)].set_symbol("▛");
+    buf[(bx - 1, top)].set_style(rail);
+    buf[(right, top)].set_symbol("▜");
+    buf[(right, top)].set_style(rail);
+    buf[(bx - 1, bottom)].set_symbol("▙");
+    buf[(bx - 1, bottom)].set_style(rail);
+    buf[(right, bottom)].set_symbol("▟");
+    buf[(right, bottom)].set_style(rail);
+    for by in top + 1..bottom {
+        buf[(right, by)].set_symbol("▐");
+        buf[(right, by)].set_style(rail);
     }
 }
 
@@ -430,7 +517,7 @@ pub(crate) fn tab_dashboards(
         .enumerate()
         .map(|(tab_idx, tab)| {
             let toks = tab.metadata_tokens.values();
-            let (state, seen, since_ms) = tab_attention(app, tab);
+            let (state, seen, since_ms, bg_wait) = tab_attention(app, tab);
             let title = toks
                 .get("t")
                 .or_else(|| toks.get("sh"))
@@ -450,15 +537,9 @@ pub(crate) fn tab_dashboards(
                 })
                 .unwrap_or_else(|| "shell".to_string());
             let phase = toks.get("ph").map(String::as_str).unwrap_or("").trim().to_string();
-            let full = if phase.is_empty() {
-                title
-            } else {
-                format!("{title}, {phase}")
-            };
-            let tint_start = (!phase.is_empty()).then(|| full.len() - phase.len());
             let inner = (width.saturating_sub(TAB_BOX_CHROME) as usize).max(8);
             let first = inner.saturating_sub(TITLE_STATUS_RESERVE as usize).max(8);
-            let lines = wrap_prose(&full, first, inner, TAB_TITLE_MAX_LINES);
+            let (tint_start, lines) = layout_tab_title(&title, &phase, first, inner);
             let mut rows = Vec::with_capacity(lines.len() + 1);
             for (i, line) in lines.iter().enumerate() {
                 let tint_at = line_tint_at(line, tint_start);
@@ -487,7 +568,7 @@ pub(crate) fn tab_dashboards(
                 tab_idx,
                 state,
                 seen,
-                subs_live: toks.get("hdr").is_some_and(|h| h.contains(" sub")),
+                bg_wait,
                 rows,
             }
         })
@@ -739,6 +820,29 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
         }
     }
     entries
+}
+
+/// 1-based sidebar location of a pane for the morse notification suffix:
+/// which space box counting down the left column, then which tab inside
+/// that space. None when the workspace row is not visible (collapsed group).
+pub(crate) fn sidebar_morse_position(
+    app: &AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+) -> Option<crate::sound::SidebarPosition> {
+    let space = workspace_list_entries(app).iter().position(|entry| {
+        let WorkspaceListEntry::Workspace {
+            ws_idx: entry_ws_idx,
+            ..
+        } = entry;
+        *entry_ws_idx == ws_idx
+    })? + 1;
+    let tab = app
+        .workspaces
+        .get(ws_idx)?
+        .find_tab_index_for_pane(pane_id)?
+        + 1;
+    Some(crate::sound::SidebarPosition { space, tab })
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, _split_ratio: f32) -> Rect {
@@ -1123,7 +1227,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         let Some(tab) = ws.tabs.get(tab_box.tab_idx) else {
             continue;
         };
-        let (state, seen, _) = tab_attention(app, tab);
+        let (state, seen, _, bg_wait) = tab_attention(app, tab);
         let selected = tab_box.ws_idx == app.selected && is_navigating;
         let tab_is_active =
             Some(tab_box.ws_idx) == app.active && tab_box.tab_idx == ws.active_tab;
@@ -1134,42 +1238,20 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             break;
         }
         let buf = frame.buffer_mut();
-        let box_bg = if selected {
-            Some(p.surface0)
-        } else if tab_is_active {
-            Some(p.surface_dim)
-        } else {
-            None
-        };
-        if let Some(bg) = box_bg {
-            // border cells too: their glyphs are thin lines, so an interior-only
-            // fill leaves a dark margin inside the box (Josh 2026-08-27)
-            for by in rect.y..rect.y + rect.height {
-                for x in bx..bx + bw {
-                    buf[(x, by)].set_style(Style::default().bg(bg));
-                }
-            }
-        }
-        let border = Style::default().fg(p.overlay0);
         let top = rect.y;
         let bottom = rect.y + rect.height - 1;
-        draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
         let rail = Style::default().fg(space_rail_color(ws, p));
         for by in rect.y..rect.y + rect.height {
             buf[(rect.x, by)].set_symbol("▌");
             buf[(rect.x, by)].set_style(rail);
         }
-        let (icon, icon_style) = state_dot(state, seen, p);
-        let subs_live = tab
-            .metadata_tokens
-            .values()
-            .get("hdr")
-            .is_some_and(|h| h.contains(" sub"));
-        if subs_live && matches!(state, AgentState::Working) {
-            buf.set_string(bx + 2, top + 1, "◉", Style::default().fg(p.teal));
+        if selected || tab_is_active {
+            draw_tab_box_sprout(buf, bx, bw, top, bottom, rail);
         } else {
-            buf.set_string(bx + 2, top + 1, icon, icon_style);
+            draw_tab_box_border(buf, bx, bw, top, bottom, Style::default().fg(p.overlay0));
         }
+        let (icon, icon_style) = tab_status_cell(state, seen, bg_wait, p);
+        buf.set_string(bx + 2, top + 1, icon, icon_style);
     }
 
     render_sidebar_toggle(app, frame, area, true, p);
@@ -1529,14 +1611,6 @@ fn render_workspace_list(
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let is_drop_target = matches!(
-            app.drag.as_ref().map(|drag| &drag.target),
-            Some(crate::app::state::DragTarget::SidebarTabMove {
-                source_ws_idx,
-                target_ws_idx: Some(target),
-                ..
-            }) if *target == i && *source_ws_idx != i
-        );
         let name_style = if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -1604,35 +1678,20 @@ fn render_workspace_list(
                 break;
             }
             let tab_is_active = is_active && dash.tab_idx == ws.active_tab;
-            // fill the whole box, border cells included: the line glyphs are
-            // thin, so stopping at the interior leaves a dark margin inside
-            // the box (Josh 2026-08-27)
-            let box_bg = if selected {
-                Some(p.surface0)
-            } else if is_dragged || is_drop_target {
-                Some(p.surface1)
-            } else if tab_is_active {
-                Some(p.surface_dim)
-            } else {
-                None
-            };
-            if let Some(bg) = box_bg {
-                for by in y..y + box_h {
-                    for x in bx..bx + bw {
-                        buf[(x, by)].set_style(Style::default().bg(bg));
-                    }
-                }
-            }
-            let border = Style::default().fg(p.overlay0);
+            // drags get the accent insertion line only, never the sprout
+            let highlighted = selected || tab_is_active;
             let top = y;
             let bottom = y + box_h - 1;
-            draw_tab_box_border(buf, bx, bw, top, bottom, border, box_bg.is_some());
             for by in y..y + box_h {
                 buf[(card.rect.x, by)].set_symbol("▌");
                 buf[(card.rect.x, by)].set_style(rail);
             }
+            if highlighted {
+                draw_tab_box_sprout(buf, bx, bw, top, bottom, rail);
+            } else {
+                draw_tab_box_border(buf, bx, bw, top, bottom, Style::default().fg(p.overlay0));
+            }
 
-            let dot = state_dot(dash.state, dash.seen, p);
             let phase_style = phase_tint(dash.state, dash.seen, p);
             let base = Style::default().fg(p.text);
             let inner_x = bx + 2;
@@ -1652,8 +1711,6 @@ fn render_workspace_list(
                             .then_some(*since_ms)
                             .flatten()
                             .map(fmt_elapsed);
-                        let ringed =
-                            dash.subs_live && matches!(dash.state, AgentState::Working);
                         let status_width = 1
                             + elapsed.as_ref().map(|e| display_width(e) + 1).unwrap_or(0);
                         let text_w =
@@ -1669,13 +1726,9 @@ fn render_workspace_list(
                             buf.set_string(sx, ry, e, Style::default().fg(p.subtext0));
                             sx += display_width(e) as u16 + 1;
                         }
-                        if ringed {
-                            // ◉ in the unseen-done blue: working, but the
-                            // wait is on subagents (Josh 2026-08-27)
-                            buf.set_string(sx, ry, "◉", Style::default().fg(p.teal));
-                        } else {
-                            buf.set_string(sx, ry, dot.0, dot.1);
-                        }
+                        let (icon, icon_style) =
+                            tab_status_cell(dash.state, dash.seen, dash.bg_wait, p);
+                        buf.set_string(sx, ry, icon, icon_style);
                     }
                     TabDashRow::TitleCont { text, tint_at } => {
                         draw_tab_line(
@@ -1787,6 +1840,41 @@ mod tests {
     }
 
     #[test]
+    fn status_cell_blends_done_but_waiting() {
+        let p = crate::app::state::AppState::test_new().palette;
+
+        let (sym, style) = tab_status_cell(AgentState::Working, false, true, &p);
+        assert_eq!(sym, "◉");
+        assert_eq!(style.fg, Some(p.mauve));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Working, true, true, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.mauve));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, true, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.teal));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Idle, true, true, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.green));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Working, false, false, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.yellow));
+        assert_eq!(style.bg, None);
+
+        let (sym, style) = tab_status_cell(AgentState::Idle, false, false, &p);
+        assert_eq!(sym, "⬤");
+        assert_eq!(style.fg, Some(p.teal));
+        assert_eq!(style.bg, None);
+    }
+
+    #[test]
     fn default_space_workspace_style_tracks_active_state() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -1802,22 +1890,59 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        // spaces carry no titles; idle tabs are bordered boxes behind a rail,
-        // the active tab is a solid slab with no outline (Josh 2026-08-27)
-        assert_eq!(buffer[(0, first_row)].symbol(), "▌");
-        assert_eq!(buffer[(1, first_row)].symbol(), " ");
+        // spaces carry no titles; the active tab's box sprouts from the rail
+        // in the rail's color, idle tabs keep the thin line box
+        assert_eq!(buffer[(0, first_row)].symbol(), "▛");
+        assert_eq!(buffer[(1, first_row)].symbol(), "▀");
+        assert_eq!(buffer[(0, first_row)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(1, first_row)].style().fg, Some(app.palette.text));
+        let corner_x = find_symbol_x(buffer, first_row, 26, "▜");
+        assert_eq!(buffer[(corner_x, first_row + 1)].symbol(), "▐");
+        let bottom_row = (first_row + 1..second_row)
+            .find(|row| buffer[(0, *row)].symbol() == "▙")
+            .expect("bottom junction below the active box");
+        assert_eq!(buffer[(1, bottom_row)].symbol(), "▄");
+        assert_eq!(buffer[(corner_x, bottom_row)].symbol(), "▟");
+        assert_eq!(buffer[(0, second_row)].symbol(), "▌");
+        assert_eq!(buffer[(1, second_row)].symbol(), "┌");
 
         let active_tab_row = first_row + 1;
         let tab = buffer[(find_symbol_x(buffer, active_tab_row, 25, "s"), active_tab_row)].style();
         assert_eq!(tab.fg, Some(app.palette.text));
-        assert_eq!(tab.bg, Some(app.palette.surface_dim));
-        let active_border = buffer[(1, first_row)].style();
-        assert_eq!(active_border.bg, Some(app.palette.surface_dim));
+        assert_eq!(tab.bg, Some(ratatui::style::Color::Reset));
 
         let idle_tab_row = second_row + 1;
         let idle = buffer[(find_symbol_x(buffer, idle_tab_row, 25, "s"), idle_tab_row)].style();
         assert_eq!(idle.fg, Some(app.palette.text));
         assert_eq!(idle.bg, Some(ratatui::style::Color::Reset));
+    }
+
+    #[test]
+    fn tab_drag_between_spaces_leaves_source_and_target_boxes_thin() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.active = None;
+        app.mode = Mode::Terminal;
+        app.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::SidebarTabMove {
+                source_ws_idx: 0,
+                source_tab_idx: 0,
+                target_ws_idx: Some(1),
+                insert_idx: None,
+            },
+        });
+        let area = Rect::new(0, 0, 26, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let first_row = app.view.workspace_card_areas[0].rect.y;
+        let second_row = app.view.workspace_card_areas[1].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(1, first_row)].symbol(), "┌");
+        assert_eq!(buffer[(1, second_row)].symbol(), "┌");
     }
 
     #[test]
@@ -2118,16 +2243,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(3, 2)].symbol(), "◧");
-        assert_eq!(buffer[(0, 5)].symbol(), "▌");
-        // the selected tab's box is a solid slab: no outline, all cells filled
-        assert_eq!(buffer[(1, 5)].symbol(), " ");
-        assert_eq!(buffer[(1, 5)].style().bg, Some(app.palette.surface0));
-        assert_eq!(buffer[(5, 7)].style().bg, Some(app.palette.surface0));
-        assert_eq!(buffer[(3, 6)].symbol(), "●");
+        // the selected tab's box sprouts from the rail in the rail's color;
+        // the unselected one keeps the thin line box
+        assert_eq!(buffer[(0, 5)].symbol(), "▛");
+        assert_eq!(buffer[(1, 5)].symbol(), "▀");
+        assert_eq!(buffer[(5, 5)].symbol(), "▜");
+        assert_eq!(buffer[(0, 6)].symbol(), "▌");
+        assert_eq!(buffer[(5, 6)].symbol(), "▐");
+        assert_eq!(buffer[(0, 7)].symbol(), "▙");
+        assert_eq!(buffer[(1, 7)].symbol(), "▄");
+        assert_eq!(buffer[(5, 7)].symbol(), "▟");
+        assert_eq!(buffer[(0, 5)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(1, 5)].style().fg, Some(app.palette.text));
+        assert_eq!(buffer[(2, 6)].style().bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(buffer[(1, 9)].symbol(), "┌");
+        assert_eq!(buffer[(3, 6)].symbol(), "⬤");
     }
 
     #[test]
-    fn collapsed_sidebar_active_tab_box_gets_backdrop() {
+    fn collapsed_sidebar_active_tab_box_sprouts_from_rail() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.ensure_test_terminals();
@@ -2147,10 +2281,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("collapsed sidebar should render");
 
         let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(active_box.x, active_box.y)].symbol(), "▛");
+        assert_eq!(buffer[(active_box.x + 1, active_box.y)].symbol(), "▀");
         let active = buffer[(active_box.x + 2, active_box.y + 1)].style();
-        assert_eq!(active.bg, Some(app.palette.surface_dim));
-        let idle = buffer[(idle_box.x + 2, idle_box.y + 1)].style();
-        assert_ne!(idle.bg, Some(app.palette.surface_dim));
+        assert_eq!(active.bg, Some(ratatui::style::Color::Reset));
+        assert_eq!(buffer[(idle_box.x + 1, idle_box.y)].symbol(), "┌");
     }
 
     #[cfg(unix)]
@@ -2658,6 +2793,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sidebar_morse_position_counts_space_and_tab_top_down() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("one"),
+            crate::workspace::Workspace::test_new("two"),
+            crate::workspace::Workspace::test_new("three"),
+        ];
+        let tab_idx = app.workspaces[2].test_add_tab(None);
+        let pane_id = app.workspaces[2].tabs[tab_idx].root_pane;
+
+        assert_eq!(
+            sidebar_morse_position(&app, 2, pane_id),
+            Some(crate::sound::SidebarPosition { space: 3, tab: 2 })
+        );
+    }
+
+    #[test]
+    fn sidebar_morse_position_is_none_when_workspace_row_is_hidden() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+        ];
+        app.collapsed_space_keys.insert("repo-key".into());
+
+        assert_eq!(
+            sidebar_morse_position(&app, 1, app.workspaces[1].tabs[0].root_pane),
+            None
+        );
+        assert_eq!(
+            sidebar_morse_position(&app, 0, app.workspaces[0].tabs[0].root_pane),
+            Some(crate::sound::SidebarPosition { space: 1, tab: 1 })
+        );
+    }
+
+    #[test]
     fn collapsed_group_hides_inactive_children_but_keeps_active_visible() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
@@ -2690,6 +2861,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ws_idx: 0,
                 indented: false,
             }]
+        );
+    }
+
+    #[test]
+    fn overflowing_tab_summary_keeps_the_phase_clause() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let body = "reportcard: pushing the /try report card redesign through \
+                    review and onto main with screenshots and stacked tiers";
+        ws.tabs[0].metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("t".into(), Some(body.to_string())),
+                ("ph".into(), Some("overhauling per review input".to_string())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+
+        for width in 40..=90u16 {
+            let dashes = tab_dashboards(&app, &app.workspaces[0], width);
+            let joined = dashes[0]
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TabDashRow::Title { text, .. } | TabDashRow::TitleCont { text, .. } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                joined.contains("overhauling per review input"),
+                "phase lost at width {width}: {joined:?}"
+            );
+        }
+
+        let area = Rect::new(0, 0, 40, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..20)
+            .map(|row| row_text(buffer, row, 40))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect::<String>();
+        let words = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains("overhauling per review input"),
+            "phase missing from render: {words:?}"
         );
     }
 

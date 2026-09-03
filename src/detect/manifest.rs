@@ -34,6 +34,7 @@ pub struct DetectionExplain {
     pub visible_idle: bool,
     pub visible_blocker: bool,
     pub visible_working: bool,
+    pub bg_wait: bool,
     pub skip_state_update: bool,
     pub skipped_update_reason: Option<String>,
     pub fallback_reason: Option<String>,
@@ -164,6 +165,8 @@ struct ManifestRule {
     visible_blocker: bool,
     #[serde(default)]
     visible_working: bool,
+    #[serde(default)]
+    background_wait: bool,
     #[serde(default)]
     skip_state_update: bool,
     #[serde(default)]
@@ -367,6 +370,7 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            bg_wait: false,
             skip_state_update: false,
             skipped_update_reason: None,
             fallback_reason: Some("unknown_agent".to_string()),
@@ -407,6 +411,7 @@ impl DetectionExplain {
             visible_idle: self.visible_idle,
             visible_blocker: self.visible_blocker,
             visible_working: self.visible_working,
+            bg_wait: self.bg_wait,
         }
     }
 }
@@ -479,6 +484,7 @@ fn evaluate_loaded_manifest(
         visible_idle: rule.visible_idle && state == AgentState::Idle,
         visible_blocker: rule.visible_blocker && state == AgentState::Blocked,
         visible_working: rule.visible_working && state == AgentState::Working,
+        bg_wait: rule.background_wait && state == AgentState::Working,
         skip_state_update: rule.skip_state_update,
         skipped_update_reason,
         fallback_reason: None,
@@ -536,6 +542,7 @@ fn fallback_explain(
         visible_idle: false,
         visible_blocker: false,
         visible_working: false,
+        bg_wait: false,
         skip_state_update: false,
         skipped_update_reason: None,
         fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),
@@ -932,6 +939,16 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
                 rule.id, TOP_NON_EMPTY_LINES_ENGINE_VERSION
             ));
         }
+        if rule.region.trim() == "last_turn_above_prompt_box"
+            && manifest
+                .min_engine_version
+                .is_some_and(|version| version < LAST_TURN_ABOVE_PROMPT_BOX_ENGINE_VERSION)
+        {
+            return Err(format!(
+                "rule {} uses last_turn_above_prompt_box but min_engine_version is below {}",
+                rule.id, LAST_TURN_ABOVE_PROMPT_BOX_ENGINE_VERSION
+            ));
+        }
         validate_rule_gate(rule, &mut complexity)
             .map_err(|err| format!("rule {} has invalid matcher gates: {err}", rule.id))?;
     }
@@ -1081,6 +1098,7 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
         | "prompt_box_body"
         | "above_prompt_box"
         | "last_non_empty_above_prompt_box"
+        | "last_turn_above_prompt_box"
         | "after_last_horizontal_rule"
         | "osc_title"
         | "osc_progress" => Ok(()),
@@ -1275,6 +1293,7 @@ fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {
         "prompt_box_body" => prompt_box_body(content).unwrap_or(""),
         "above_prompt_box" => above_prompt_box(content),
         "last_non_empty_above_prompt_box" => last_non_empty_line(above_prompt_box(content)),
+        "last_turn_above_prompt_box" => last_turn_above_prompt_box(content),
         "after_last_horizontal_rule" => after_last_horizontal_rule(content),
         _ => {
             if let Some(count) = region_count(trimmed, "bottom_lines") {
@@ -1299,6 +1318,7 @@ fn region_count(spec: &str, name: &str) -> Option<usize> {
 }
 
 const TOP_NON_EMPTY_LINES_ENGINE_VERSION: u32 = 3;
+const LAST_TURN_ABOVE_PROMPT_BOX_ENGINE_VERSION: u32 = 4;
 const MAX_TOP_REGION_LINE_COUNT: usize = u16::MAX as usize;
 
 fn top_region_count(spec: &str) -> Option<usize> {
@@ -1440,6 +1460,18 @@ fn above_prompt_box(content: &str) -> &str {
     };
     let end = line_start_offset(content, &lines, top);
     &content[..end.min(content.len())]
+}
+
+fn last_turn_above_prompt_box(content: &str) -> &str {
+    let above = above_prompt_box(content);
+    let lines: Vec<&str> = above.lines().collect();
+    let Some(index) = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('❯'))
+    else {
+        return above;
+    };
+    slice_from_line_index(above, &lines, index + 1)
 }
 
 fn after_last_horizontal_rule(content: &str) -> &str {

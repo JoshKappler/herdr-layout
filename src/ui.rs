@@ -6,7 +6,12 @@ use ratatui::{
 };
 
 mod detail_panel;
-pub(crate) use self::detail_panel::{detail_panel_hit, detail_panel_max_scroll, DetailPanelHit};
+pub(crate) use self::detail_panel::{
+    detail_panel_hit, detail_panel_max_scroll, detail_panel_viewer_max_scroll,
+    detail_panel_viewer_rect, DetailPanelHit,
+};
+#[cfg(test)]
+pub(crate) use self::detail_panel::test_viewer_buttons;
 mod dialogs;
 mod keybind_help;
 mod menus;
@@ -80,9 +85,8 @@ pub(crate) use self::{
         agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
         agent_panel_toggle_rect, all_agent_panel_entries, collapsed_minimize_button_rect,
         collapsed_sidebar_toggle_rect, collapsed_tab_boxes, compute_workspace_card_areas,
-        compute_workspace_list_areas,
-        expanded_sidebar_sections,
-        expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
+        compute_workspace_list_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
+        normalized_workspace_scroll, sidebar_morse_position, sidebar_section_divider_rect,
         workspace_drop_indicator_row, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
         workspace_parent_group_state, AgentPanelEntry, WorkspaceListEntry,
@@ -222,6 +226,10 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    // Every render path must refresh the latch: the headless server renders
+    // through the cell-size and no-resize entry points, and a latch that only
+    // moves on the default path blinks the btw button during streaming.
+    app.refresh_btw_session_latch();
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -254,9 +262,11 @@ fn compute_view_internal(
 
     if detail_w > 0 {
         app.refresh_detail_panel();
+        app.tick_detail_cycler(std::time::Instant::now());
         app.detail_panel_scroll = app
             .detail_panel_scroll
             .min(detail_panel::detail_panel_max_scroll(app, detail_area));
+        detail_panel::sync_viewer_scroll(app);
     }
 
     let (tab_bar_rect, terminal_area) = app
@@ -453,6 +463,7 @@ pub fn render_with_runtime_registry(
         render_empty(app, frame, terminal_area);
     }
 
+    render_btw_fork_button(app, frame);
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
@@ -488,6 +499,32 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
+}
+
+/// Floating "btw" button in the terminal area's top-right corner; forks the
+/// focused pane's Claude session on click. Same chrome as the sidebar header
+/// buttons, cleared like a toast since it sits over pane content.
+fn render_btw_fork_button(app: &AppState, frame: &mut Frame) {
+    let rect = app.btw_fork_button_rect();
+    if rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let p = &app.palette;
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(Style::default().fg(p.text))
+        .style(Style::default().bg(p.panel_bg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(Span::styled(
+            "btw",
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(ratatui::layout::Alignment::Center),
+        inner,
+    );
 }
 
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {
@@ -1030,9 +1067,9 @@ mod tests {
 
         let boxes = collapsed_tab_boxes(&app, app.view.sidebar_rect);
         let active_box = boxes.iter().find(|b| b.ws_idx == 1).unwrap().rect;
-        let active_style = buffer[(active_box.x + 2, active_box.y + 1)].style();
 
-        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(buffer[(active_box.x, active_box.y)].symbol(), "▛");
+        assert_eq!(buffer[(active_box.x + 1, active_box.y)].symbol(), "▀");
     }
 
     #[test]
@@ -1064,12 +1101,9 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        // spaces no longer render titles; the tab box carries the content
-        // (the active tab renders as a solid slab, so its top row is blank)
-        assert!(
-            line1.starts_with("▌┌") || line1.trim_end() == "▌",
-            "box top: {line1:?}"
-        );
+        // spaces no longer render titles; the tab box carries the content,
+        // and the selected tab's box sprouts from the rail
+        assert!(line1.starts_with("▛▀"), "box top: {line1:?}");
         assert!(!line2.contains("1 one"));
         assert!(line2.contains("shell"), "tab row: {line2:?}");
 
