@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.09.01.2"
-min_engine_version = 2
-updated_at = "2026-08-28T00:00:00Z"
+version = "2026.09.03.1"
+min_engine_version = 4
+updated_at = "2026-09-03T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -149,11 +149,12 @@ contains = ["run a dynamic workflow?", "esc to cancel"]
 id = "handoff_needs_you"
 state = "blocked"
 priority = 955
-region = "above_prompt_box"
+region = "last_turn_above_prompt_box"
 visible_blocker = true
 # a finished turn declaring merge or approval readiness gets the needs-you
-# siren instead of the casual done chime (Josh 2026-08-27); the region
-# excludes the prompt box body so typed text cannot trigger it
+# siren instead of the casual done chime (Josh 2026-08-27); the region is
+# the last turn only, so an earlier turn's text or typed text cannot
+# trigger it (2026-09-03)
 any = [
   { contains = ["ready to merge"] },
   { contains = ["ready for merge"] },

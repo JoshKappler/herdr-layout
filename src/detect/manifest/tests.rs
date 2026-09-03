@@ -590,6 +590,63 @@ contains = ["active"]
     assert!(parse_manifest(manifest).is_err());
 }
 
+#[test]
+fn last_turn_above_prompt_box_starts_after_the_last_prompt_echo() {
+    let content = "old awaiting approval\n❯ first ask\nmiddle\n  ❯ second ask\nnew done\n────────────\n❯\n────────────\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: content,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "last_turn_above_prompt_box"
+        ),
+        "new done\n"
+    );
+}
+
+#[test]
+fn last_turn_above_prompt_box_without_an_echo_is_the_whole_slice() {
+    // the prompt box's own ❯ sits below the top border, so it is not an echo
+    let content = "old awaiting approval\nnew done\n────────────\n❯ typed text\n────────────\n";
+
+    assert_eq!(
+        region(
+            DetectionInput {
+                screen: content,
+                osc_title: "",
+                osc_progress: "",
+            },
+            "last_turn_above_prompt_box"
+        ),
+        "old awaiting approval\nnew done\n"
+    );
+}
+
+#[test]
+fn last_turn_above_prompt_box_requires_engine_four_when_declared() {
+    let manifest = |min_engine_version: u32| {
+        format!(
+            r#"
+id = "claude"
+version = "1"
+min_engine_version = {min_engine_version}
+
+[[rules]]
+id = "handoff"
+state = "blocked"
+region = " last_turn_above_prompt_box "
+contains = ["ready to merge"]
+"#
+        )
+    };
+
+    assert!(parse_manifest(&manifest(3)).is_err());
+    assert!(parse_manifest(&manifest(4)).is_ok());
+}
+
 // ---------------------------------------------------------------------------
 // OSC rule tests — exercise the new osc_title / osc_progress regions against
 // the bundled Claude and Codex manifests.
@@ -1093,6 +1150,67 @@ fn claude_needs_you_marker_line_is_blocked() {
         ────────────\n\
         ❯\n\
         ────────────\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Blocked,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("handoff_needs_you")
+    );
+    assert!(result.visible_blocker);
+}
+
+#[test]
+fn claude_old_turn_handoff_text_behind_a_new_prompt_echo_is_idle() {
+    // the readiness phrases sit in an earlier turn; the turn after the ❯ echo
+    // needs nobody (live pane w40:p3, 2026-09-03)
+    let screen = "  security fixes awaiting approval. The ledger calls them green...\n\
+        brand asset with no in-app home, awaiting approval since 8/24\n\
+        \n\
+        ✻ Sautéed for 11m 18s · done 12:02 PM\n\
+        \n\
+        ❯ ok, close the ones you said\n\
+        \n\
+        ⏺ Done. All 18 closed 12:06 to 12:07 PDT 2026-09-03, no comments posted, branches kept on origin.\n\
+        \n\
+        ✻ Sautéed for 1m 29s · done 12:07 PM\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5.1 · 22% · ok, close the ones you said\n";
+    let result = osc_explain(Agent::Claude, screen, "", "");
+    assert_eq!(
+        result.state,
+        AgentState::Idle,
+        "matched: {:?}",
+        result.matched_rule
+    );
+    assert_eq!(
+        result.matched_rule.as_ref().map(|r| r.id.as_str()),
+        Some("live_prompt_box")
+    );
+    assert!(!result.visible_blocker);
+}
+
+#[test]
+fn claude_handoff_text_in_the_turn_after_a_prompt_echo_is_blocked() {
+    let screen = "  security fixes awaiting approval. The ledger calls them green...\n\
+        \n\
+        ✻ Sautéed for 11m 18s · done 12:02 PM\n\
+        \n\
+        ❯ ok, close the ones you said\n\
+        \n\
+        ⏺ Done. All 18 closed and the PR is ready to merge.\n\
+        \n\
+        ✻ Sautéed for 1m 29s · done 12:07 PM\n\
+        ────────────\n\
+        ❯\n\
+        ────────────\n\
+        Fable 5.1 · 22% · ok, close the ones you said\n";
     let result = osc_explain(Agent::Claude, screen, "", "");
     assert_eq!(
         result.state,
